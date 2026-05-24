@@ -28,24 +28,17 @@ Mitigations to consider:
 
 Related: [src/sidepanel/App.tsx](src/sidepanel/App.tsx) `fetchAllPagesPosts`.
 
-## phpBB phantom post (extractor overcount)
+## Non-phpBB platform support (decide scope, then verify)
 
-On f-16.net (phpBB), `extractPosts` finds ~1 extra "post" per page beyond what the forum actually has — observed 2026-05-24 on a 31-post / 3-page thread reporting 16 + 16 + 2 = 34 detected. The phantom has enough text to clear `MIN_POST_LENGTH=10`, so it reaches the summarizer.
+The selectors for XenForo, vBulletin, Discourse, and Invision were ported from v1 and **have not been re-verified on real sites in v2**. README.md currently advertises support for all five platforms but the only one we've tested is phpBB (f-16.net). Before claiming broader compatibility we should decide whether that breadth is worth the maintenance cost.
 
-Hypothesis: the `.post` selector matches an element that isn't a real post (likely the "Post a reply" form region, a topic-header wrapper, or a hidden preview template). Confirm by inspecting DOM on f-16.net and tightening the selector — e.g. require `.post.bg1, .post.bg2` (alternating-row classes phpBB applies to real posts in most themes) or `div.post[id^="p"]` (real posts have `id="p<post_id>"`).
+If we commit to supporting them, the followup work is:
 
-Related: [src/content/selectors.ts](src/content/selectors.ts), [src/content/extract.ts](src/content/extract.ts).
+- **Verify post extraction** on a live thread of each platform. Likely need selector adjustments — forum themes vary widely and the v1 selectors are 2+ years old.
+- **Tighten post selectors against ad/template phantoms.** PhpBB needed `div.post[id^="p"]` to exclude googletag wrappers ([src/content/selectors.ts](src/content/selectors.ts)); other platforms probably have analogous noise.
+- **Populate `Pagination.totalPosts` per platform.** Phase 3a/b added the field; currently only phpBB fills it. XenForo shows "Replies: N" in `.p-description`; vBulletin in `.threadmeta`; Invision in a topic-stats block. Without it the UI estimates from `posts × totalPages`, which over-counts when the last page is partial.
+- **Infinite-scroll platforms (Discourse, modern XenForo).** These don't have sibling page URLs, so the Phase 3b cross-page fetch doesn't apply. Would need scroll automation or a different extraction strategy. Likely out of scope.
 
-## Multi-page threads
+If we don't commit, narrow README.md to "phpBB only (others experimental)" so we don't oversell.
 
-The Phase 2 extractor only sees posts on the currently rendered page. Long forum threads paginate (phpBB: typically 10-25 posts/page; XenForo: 20/page; vBulletin: 10/page) or lazy-load (Discourse, modern XenForo with infinite scroll). A 100-reply thread split across 4 pages currently gets only the visible page summarized.
-
-Design notes for when this is picked up:
-
-- **Pagination link detection per platform.** Each FORUM_SELECTORS entry needs a `pagination` selector (e.g. phpBB: `.pagination a`, XenForo: `nav.pageNav a`). Walking those gives the full page list.
-- **Background fetch with credentials.** Content scripts can `fetch(otherPageUrl, { credentials: 'include' })` to pull additional pages using the user's existing session cookies — required for auth-walled forums. Parse the returned HTML with `new DOMParser().parseFromString()` and re-run `extractPosts()` on it.
-- **Infinite scroll vs paginated.** Discourse and modern XenForo use lazy-loading inside the same DOM. v1 used a MutationObserver to catch these. For v2, either restore the observer or trigger scroll programmatically and wait for new posts.
-- **UX:** show "Found N posts on this page · X more pages available" with a "Include all pages" toggle. Don't auto-fetch — extra pages = extra LLM cost.
-- **Ordering:** posts from fetched pages must merge with current-page posts in the right order (typically by URL pagination param, but watch for "newest first" forums).
-
-Related: [src/content/extract.ts](src/content/extract.ts), [src/content/selectors.ts](src/content/selectors.ts).
+Related: [src/content/selectors.ts](src/content/selectors.ts), [src/content/pagination.ts](src/content/pagination.ts), [src/lib/pagination.ts](src/lib/pagination.ts), [README.md](README.md).

@@ -40,11 +40,18 @@ function phpbb(doc: Document, url: URL): Pagination {
   const postsPerPage = sorted.find((s) => s > 0) ?? 15
   const maxStart = sorted[sorted.length - 1]
 
+  // phpBB shows "31 posts" inside .topic-actions .pagination (direct text).
+  const actionsText =
+    doc.querySelector('.topic-actions .pagination')?.textContent ?? ''
+  const postsMatch = actionsText.match(/(\d+)\s+posts?\b/i)
+  const totalPosts = postsMatch ? parseInt(postsMatch[1], 10) : undefined
+
   return {
     currentPage: Math.floor(currentStart / postsPerPage) + 1,
     totalPages: Math.floor(maxStart / postsPerPage) + 1,
     canonicalUrl: canonical.toString(),
     scheme: { kind: 'phpbb-start', postsPerPage },
+    totalPosts,
   }
 }
 

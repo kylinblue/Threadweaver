@@ -382,10 +382,13 @@ function ThreadCard({
   const isMultiPage =
     detection.kind === 'ready' && detection.pagination.totalPages > 1
 
-  const estimatedTotal =
+  const totalPosts =
     detection.kind === 'ready'
-      ? detection.posts.length * detection.pagination.totalPages
+      ? detection.pagination.totalPosts ??
+        detection.posts.length * detection.pagination.totalPages
       : 0
+  const totalIsExact =
+    detection.kind === 'ready' && detection.pagination.totalPosts != null
 
   return (
     <section className="card">
@@ -417,6 +420,9 @@ function ThreadCard({
             {isMultiPage && (
               <> · page {detection.pagination.currentPage} of {detection.pagination.totalPages}</>
             )}
+            {isMultiPage && detection.posts.length > 0 && (
+              <> · {totalIsExact ? '' : '~'}{totalPosts} total</>
+            )}
           </p>
           {isMultiPage && (
             <label className="row">
@@ -446,7 +452,7 @@ function ThreadCard({
             ? 'Summarizing page…'
             : detection.kind === 'ready' && detection.posts.length > 0
             ? includeAllPages && isMultiPage
-              ? `Analyze full thread (~${estimatedTotal} posts)`
+              ? `Analyze full thread (${totalIsExact ? '' : '~'}${totalPosts} posts)`
               : `Analyze thread (${detection.posts.length} posts)`
             : 'Summarize page'}
         </button>

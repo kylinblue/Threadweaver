@@ -24,7 +24,10 @@ export const FORUM_SELECTORS: Record<Exclude<ForumPlatform, 'unknown'>, ForumSel
     ignore: '.message-signature',
   },
   phpbb: {
-    post: '.post',
+    // PhpBB real posts always carry id="p<post_id>". Without the id-prefix
+    // qualifier, sites like f-16.net also match googletag ad wrappers that
+    // reuse the `.post` class.
+    post: 'div.post[id^="p"]',
     author: 'p.author strong',
     timestamp: 'p.author',
     content: '.postbody .content',

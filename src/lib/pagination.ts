@@ -19,6 +19,12 @@ export interface Pagination {
   /** URL with the page indicator stripped — used as IndexedDB key. */
   canonicalUrl: string
   scheme: PageScheme
+  /**
+   * Exact total post count if the platform exposes it in the DOM. Some forums
+   * (phpBB) display "31 posts" in the topic action bar; others bury it. Falls
+   * back to undefined — UI should estimate from posts × totalPages.
+   */
+  totalPosts?: number
 }
 
 /**

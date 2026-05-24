@@ -12,6 +12,8 @@ export type PageScheme =
   | { kind: 'xenforo-path' }
   | { kind: 'vbulletin-page' }
   | { kind: 'invision-path' }
+  | { kind: 'mybb-path' }
+  | { kind: 'smf-topic-offset'; postsPerPage: number }
 
 export interface Pagination {
   currentPage: number
@@ -64,6 +66,19 @@ function buildPageUrl(canonicalUrl: string, page: number, scheme: PageScheme): s
     case 'invision-path': {
       const path = url.pathname.endsWith('/') ? url.pathname : url.pathname + '/'
       url.pathname = `${path}page/${page}/`
+      return url.toString()
+    }
+    case 'mybb-path': {
+      // thread-NNN.html (page 1) → thread-NNN-page-N.html (page N).
+      url.pathname = url.pathname.replace(/(thread-\d+)(\.html)$/, `$1-page-${page}$2`)
+      return url.toString()
+    }
+    case 'smf-topic-offset': {
+      // topic=594037.0 (page 1) → topic=594037.OFFSET where OFFSET = (page-1) * postsPerPage
+      const topic = url.searchParams.get('topic')
+      if (!topic) return canonicalUrl
+      const baseTopic = topic.split('.')[0]
+      url.searchParams.set('topic', `${baseTopic}.${(page - 1) * scheme.postsPerPage}`)
       return url.toString()
     }
   }

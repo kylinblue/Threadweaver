@@ -2,6 +2,8 @@ export type ForumPlatform =
   | 'phpbb'
   | 'xenforo'
   | 'vbulletin'
+  | 'mybb'
+  | 'smf'
   | 'discourse'
   | 'invision'
   | 'generic'

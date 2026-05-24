@@ -8,7 +8,19 @@ Reads forum posts directly from the page you're viewing — including auth-walle
 
 ## Supported forums
 
-Post extraction is tuned for phpBB, XenForo, vBulletin, Discourse, and Invision Community, plus a generic fallback. Currently extracts posts on the **visible page only** — multi-page threads aren't merged yet ([TODO.md](TODO.md)).
+| Engine | Status | Verified against |
+|---|---|---|
+| phpBB | ✅ tested | [f-16.net](https://www.f-16.net/forum/) |
+| XenForo | ✅ tested | [xenforo.com/community](https://xenforo.com/community/) |
+| MyBB | ✅ tested | [community.mybb.com](https://community.mybb.com/) |
+| SMF | ✅ tested | [simplemachines.org/community](https://www.simplemachines.org/community/) |
+| vBulletin 4 | ⚠️ selectors present but unverified — couldn't find an accessible live vB4 site in 2026 |
+| Invision Community | ⚠️ selectors present but unverified |
+| Discourse | ❌ not supported (infinite-scroll SPA; future work via JSON API — see [TODO.md](TODO.md)) |
+| Reddit, Hacker News, Stack Exchange, Flarum, NodeBB | ❌ out of scope (different paradigms; see [TODO.md](TODO.md)) |
+| anything else | best-effort generic fallback selectors |
+
+Multi-page threads are handled via an opt-in "Include all N pages" toggle that fetches sibling pages using your existing session cookies (works on auth-walled forums).
 
 ## Setup
 

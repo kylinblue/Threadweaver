@@ -12,6 +12,8 @@ export function extractPagination(
     case 'xenforo': return xenforo(doc, url)
     case 'vbulletin': return vbulletin(doc, url)
     case 'invision': return invision(doc, url)
+    case 'mybb': return mybb(doc, url)
+    case 'smf': return smf(doc, url)
     // Discourse uses infinite scroll, not paginated URLs. Treat as single page.
     case 'discourse':
     case 'generic':
@@ -164,4 +166,76 @@ function intParam(url: URL, name: string, fallback: number): number {
   if (v == null) return fallback
   const n = parseInt(v, 10)
   return Number.isFinite(n) ? n : fallback
+}
+
+// ---------- MyBB ----------
+// URL: thread-NNN.html (page 1) or thread-NNN-page-N.html (page N).
+function mybb(doc: Document, url: URL): Pagination {
+  const canonical = new URL(url.toString())
+  canonical.pathname = canonical.pathname.replace(/(thread-\d+)-page-\d+(\.html)$/, '$1$2')
+
+  const pageMatch = url.pathname.match(/thread-\d+-page-(\d+)\.html$/)
+  const currentPage = pageMatch ? parseInt(pageMatch[1], 10) : 1
+
+  // MyBB renders thread pagination inside <span class="pages">Pages (N):</span>
+  // followed by .pagination links. Both are duplicated near forum-level pagination,
+  // so we scope by href pattern instead.
+  let maxPage = currentPage
+  doc
+    .querySelectorAll<HTMLAnchorElement>('a[href*="thread-"][href*="-page-"]')
+    .forEach((a) => {
+      const m = (a.getAttribute('href') ?? '').match(/thread-\d+-page-(\d+)\.html/)
+      if (m) maxPage = Math.max(maxPage, parseInt(m[1], 10))
+    })
+
+  // Fallback to "Pages (N):" label text if no page-N links were found.
+  if (maxPage === currentPage) {
+    const pagesLabel = Array.from(doc.querySelectorAll('span.pages'))
+      .map((el) => el.textContent ?? '')
+      .find((t) => /Pages?\s*\(\d+\)/i.test(t))
+    const m = pagesLabel?.match(/Pages?\s*\((\d+)\)/i)
+    if (m) maxPage = parseInt(m[1], 10)
+  }
+
+  return {
+    currentPage,
+    totalPages: maxPage,
+    canonicalUrl: canonical.toString(),
+    scheme: { kind: 'mybb-path' },
+  }
+}
+
+// ---------- Simple Machines Forum (SMF) ----------
+// URL: index.php?topic=NNN.OFFSET where OFFSET = (page-1) * postsPerPage.
+// Page 1 is topic=NNN.0. Default postsPerPage is 20.
+function smf(doc: Document, url: URL): Pagination {
+  const topicRaw = url.searchParams.get('topic') ?? ''
+  const [tidPart, offsetPart] = topicRaw.split('.')
+  const currentOffset = parseInt(offsetPart ?? '0', 10) || 0
+
+  const canonical = new URL(url.toString())
+  if (tidPart) canonical.searchParams.set('topic', `${tidPart}.0`)
+
+  // Collect all topic=NNN.OFFSET values from pagination links to derive
+  // postsPerPage (smallest non-zero offset) and totalPages (max).
+  const offsets = new Set<number>([0, currentOffset])
+  doc.querySelectorAll<HTMLAnchorElement>('.pagelinks a, .pagesection a').forEach((a) => {
+    try {
+      const u = new URL(a.getAttribute('href') ?? '', url)
+      const t = u.searchParams.get('topic') ?? ''
+      const off = parseInt(t.split('.')[1] ?? '0', 10)
+      if (Number.isFinite(off)) offsets.add(off)
+    } catch { /* ignore */ }
+  })
+
+  const sorted = [...offsets].sort((a, b) => a - b)
+  const postsPerPage = sorted.find((o) => o > 0) ?? 20
+  const maxOffset = sorted[sorted.length - 1]
+
+  return {
+    currentPage: Math.floor(currentOffset / postsPerPage) + 1,
+    totalPages: Math.floor(maxOffset / postsPerPage) + 1,
+    canonicalUrl: canonical.toString(),
+    scheme: { kind: 'smf-topic-offset', postsPerPage },
+  }
 }

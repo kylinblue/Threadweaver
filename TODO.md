@@ -28,17 +28,32 @@ Mitigations to consider:
 
 Related: [src/sidepanel/App.tsx](src/sidepanel/App.tsx) `fetchAllPagesPosts`.
 
-## Non-phpBB platform support (decide scope, then verify)
+## vBulletin 4 + Invision Community — verify selectors
 
-The selectors for XenForo, vBulletin, Discourse, and Invision were ported from v1 and **have not been re-verified on real sites in v2**. README.md currently advertises support for all five platforms but the only one we've tested is phpBB (f-16.net). Before claiming broader compatibility we should decide whether that breadth is worth the maintenance cost.
+Selectors are present in [src/content/selectors.ts](src/content/selectors.ts) but never verified against live sites in v2:
 
-If we commit to supporting them, the followup work is:
+- **vBulletin 4** — couldn't find an accessible vB4 site in 2026 (forum.vbulletin.com is behind Cloudflare and now vB6; most vB4 communities have migrated or are private). If a representative site surfaces, verify the post selector against ad/widget phantoms (phpBB needed `div.post[id^="p"]`; vB4 likely needs `[id^="post_"]` or `[id^="post"]`).
+- **Invision Community** — selectors ported from v1 untested. ipsApp/ipsPagination structure has likely shifted across IPS 4.x → 5.x. Verify on a real site (xenforo.com sometimes mentions IPS reference forums).
 
-- **Verify post extraction** on a live thread of each platform. Likely need selector adjustments — forum themes vary widely and the v1 selectors are 2+ years old.
-- **Tighten post selectors against ad/template phantoms.** PhpBB needed `div.post[id^="p"]` to exclude googletag wrappers ([src/content/selectors.ts](src/content/selectors.ts)); other platforms probably have analogous noise.
-- **Populate `Pagination.totalPosts` per platform.** Phase 3a/b added the field; currently only phpBB fills it. XenForo shows "Replies: N" in `.p-description`; vBulletin in `.threadmeta`; Invision in a topic-stats block. Without it the UI estimates from `posts × totalPages`, which over-counts when the last page is partial.
-- **Infinite-scroll platforms (Discourse, modern XenForo).** These don't have sibling page URLs, so the Phase 3b cross-page fetch doesn't apply. Would need scroll automation or a different extraction strategy. Likely out of scope.
+For both: populate `Pagination.totalPosts` once on a live site so the UI shows exact totals instead of `~estimate`.
 
-If we don't commit, narrow README.md to "phpBB only (others experimental)" so we don't oversell.
+## Discourse via JSON API
 
-Related: [src/content/selectors.ts](src/content/selectors.ts), [src/content/pagination.ts](src/content/pagination.ts), [src/lib/pagination.ts](src/lib/pagination.ts), [README.md](README.md).
+Discourse is infinite-scroll, so our current "fetch sibling URLs" architecture doesn't apply. The clean path is its public JSON API: `GET /t/<slug>/<id>.json` returns the full topic including all posts and metadata in one response. Worth a dedicated `DiscourseAdapter` (parallel to the current DOM extractor path) — would unlock summarizing official communities (Rust, Elm, Hugging Face, many OSS projects).
+
+Implementation pointers:
+- Detect Discourse via `meta[name="generator"][content*="Discourse"]` (already done) AND `window.Discourse` global (not accessible from content script's isolated world, so meta tag is what we use).
+- Adapter sends `fetch('/t/<slug>/<id>.json', { credentials: 'include', headers: { 'Accept': 'application/json' } })` from content script.
+- Map response `.post_stream.posts[]` to our `Post` type. Topic title from `.title`, author from `post.username`, content from `post.cooked` (HTML — needs sanitization or text extraction).
+- Pagination doesn't apply — single fetch returns everything.
+
+Related: [src/content/](src/content/), [src/lib/](src/lib/).
+
+## Out of scope (explicitly not supported)
+
+These were considered and rejected for v2 because they don't fit the "linear thread of posts" model:
+
+- **Reddit, Lemmy** — tree-threaded comment forests with voting and collapsing. Different problem; would need a new Post model.
+- **Stack Exchange, Hacker News** — Q&A and ranked-comment formats, not threads.
+- **Flarum, NodeBB** — modern infinite-scroll forums with small installed bases. Cost > benefit.
+- **GitHub Discussions / Issues** — better served by the GitHub API than by scraping.

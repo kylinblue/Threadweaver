@@ -17,11 +17,26 @@ export const FORUM_SELECTORS: Record<Exclude<ForumPlatform, 'unknown'>, ForumSel
     ignore: '.signature, .ads, .reactions, .footer, [class*="signature"]',
   },
   xenforo: {
-    post: 'article.message',
+    // data-content="post-N" filters out widget articles that reuse .message
+    post: 'article.message[data-content^="post-"]',
     author: '.message-name',
     timestamp: 'time.u-dt',
     content: '.message-body .bbWrapper',
     ignore: '.message-signature',
+  },
+  mybb: {
+    post: 'div.post[id^="post_"]',
+    author: '.post_author strong',
+    timestamp: '.post_date',
+    content: '.post_body',
+    ignore: '.signature, .post_signature',
+  },
+  smf: {
+    post: '.post_wrapper',
+    author: '.poster h4',
+    timestamp: '.keyinfo .smalltext',
+    content: '.post',
+    ignore: '.signature',
   },
   phpbb: {
     // PhpBB real posts always carry id="p<post_id>". Without the id-prefix

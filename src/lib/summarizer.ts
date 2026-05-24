@@ -77,7 +77,10 @@ export async function* summarizeThread(
       posts: chunk.length,
     }
 
-    const messages = buildSummarizePostsMessages(chunk)
+    const messages = buildSummarizePostsMessages(chunk, '', {
+      index: i,
+      total: chunks.length,
+    })
     const res = await provider.generate(messages, {
       model,
       abortSignal: opts.abortSignal,

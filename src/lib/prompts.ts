@@ -14,7 +14,7 @@ Ignore:
 - "+1" or "thanks" posts without substance
 - Duplicate information
 
-Provide a concise summary highlighting the most important information.`
+Provide a concise summary highlighting the most important information. Do not editorialize about whether the thread looks complete or whether more context would help — just summarize what you are given.`
 
 const META_SUMMARIZE_SYSTEM = `You are condensing multiple summaries of a forum thread into a single coherent summary.
 
@@ -24,9 +24,17 @@ Produce a unified summary that:
 - Preserves chronological flow if relevant
 - Highlights main themes and conclusions`
 
+export interface BatchInfo {
+  /** 0-based index of this batch. */
+  index: number
+  /** Total number of batches the thread will be split into. */
+  total: number
+}
+
 export function buildSummarizePostsMessages(
   posts: Post[],
   guidance: string = '',
+  batch?: BatchInfo,
 ): ChatMessage[] {
   const postsText = posts
     .map(
@@ -35,7 +43,16 @@ export function buildSummarizePostsMessages(
     )
     .join('\n\n')
 
+  // Tell the model when it's seeing a chunk so it doesn't editorialize about
+  // missing context ("unfortunately the thread is incomplete..."). A separate
+  // meta-summarization pass will combine the per-batch summaries later.
+  const batchLine =
+    batch && batch.total > 1
+      ? `This is batch ${batch.index + 1} of ${batch.total} from a longer thread. Summarize only these posts faithfully — earlier and later batches are handled separately.\n`
+      : ''
+
   const userParts = [
+    batchLine,
     guidance ? `User guidance: ${guidance}\n` : '',
     `Posts to summarize:\n\n${postsText}`,
   ].filter(Boolean)

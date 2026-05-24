@@ -1,5 +1,5 @@
 :root {
-  font: 14px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
+  font: 13px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
   color-scheme: light dark;
 }
 
@@ -10,16 +10,137 @@ body {
 }
 
 main {
-  padding: 16px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-h1 {
-  font-size: 18px;
+header h1 {
+  font-size: 15px;
   font-weight: 600;
-  margin: 0 0 8px;
+  margin: 0;
+}
+
+.card {
+  border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card h2 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: GrayText;
+  margin: 0 0 2px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: GrayText;
+}
+
+input, select {
+  font: inherit;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 4px;
+  background: Canvas;
+  color: CanvasText;
+}
+
+input:focus, select:focus {
+  outline: 2px solid Highlight;
+  outline-offset: -1px;
+}
+
+button {
+  font: inherit;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 4px;
+  background: Canvas;
+  color: CanvasText;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: color-mix(in srgb, CanvasText 6%, transparent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: AccentColor;
+  color: AccentColorText;
+  border-color: AccentColor;
+  font-weight: 500;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: color-mix(in srgb, CanvasText 10%, transparent);
+  color: GrayText;
+}
+
+.badge.ok { background: color-mix(in srgb, #16a34a 25%, transparent); color: #166534; }
+.badge.warn { background: color-mix(in srgb, #eab308 25%, transparent); color: #854d0e; }
+.badge.error { background: color-mix(in srgb, #dc2626 25%, transparent); color: #991b1b; }
+
+@media (prefers-color-scheme: dark) {
+  .badge.ok { color: #86efac; }
+  .badge.warn { color: #fde68a; }
+  .badge.error { color: #fca5a5; }
 }
 
 .hint {
+  font-size: 12px;
   color: GrayText;
   margin: 0;
+}
+
+.hint.error {
+  color: #dc2626;
+}
+
+.hint code.block {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, CanvasText 8%, transparent);
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  color: CanvasText;
+  user-select: all;
+}
+
+.summary {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  background: color-mix(in srgb, CanvasText 5%, transparent);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font: inherit;
+  color: CanvasText;
+  max-height: 60vh;
+  overflow-y: auto;
 }

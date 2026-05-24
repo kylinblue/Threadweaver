@@ -1,66 +1,73 @@
-# ThreadWeaver
+# React + TypeScript + Vite
 
-> **⚠️ Work in Progress**: This project is under active development. Code will be published once a stable release is ready.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-A Chrome extension that summarizes long forum threads using AI. Instead of reading hundreds of posts manually, ThreadWeaver processes threads in real-time and lets you query the content with natural language.
+Currently, two official plugins are available:
 
-## What It Does
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-- **Extracts** posts from forum threads as you browse
-- **Summarizes** content using Google Gemini AI
-- **Answers** questions about the thread without reading every post
-- **Updates** in real-time as more posts are processed
+## React Compiler
 
-## How It Works
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
+
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
 ```
-Chrome Extension → Local Backend → Gemini API
-     ↓                  ↓              ↓
-Extracts Posts    Processes &     Summarizes
-                  Stores Data     Content
+
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
 ```
-
-**Three Components:**
-1. **Extension**: Extracts forum posts from web pages
-2. **Backend**: Python FastAPI server with WebSocket for real-time updates
-3. **Frontend**: React UI for viewing summaries and querying threads
-
-## Current Status
-
-✅ **MVP Complete** - Basic functionality working:
-- Post extraction from phpBB forums (tested on f-16.net)
-- Real-time processing with WebSocket communication
-- AI-powered summarization with Gemini 2.0 Flash
-- Live progress updates in UI
-
-🚧 **Next Steps**:
-- Rate limiting and cost controls
-- Support for more forum platforms
-- Persistent UI panel
-- Enhanced summarization prompts
-- Chrome Web Store deployment
-
-## Tech Stack
-
-- **Extension**: Chrome Manifest V3, vanilla JavaScript
-- **Backend**: Python, FastAPI, WebSockets, SQLite, aiosqlite
-- **Frontend**: React, Vite
-- **AI**: Google Gemini 2.0 Flash API
-
-## Documentation
-
-- `QUICK_REFERENCE.md` - Quick start guide and common commands
-- `PROJECT_STATUS.md` - Current development status
-- `TODO.md` - Feature roadmap
-- `CLAUDE.md` - Original design document
-
-## Why Local Processing?
-
-- **Privacy**: Your browsing data stays on your machine
-- **Control**: Use your own API key, manage costs
-- **Flexibility**: Customize summarization, swap AI providers
-- **Speed**: No server round-trips for data storage
-
-## License
-
-GNU GPLv3

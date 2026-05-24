@@ -94,6 +94,39 @@ button.primary {
   gap: 8px;
 }
 
+.row.between {
+  justify-content: space-between;
+}
+
+button.link {
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: GrayText;
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+button.link:hover:not(:disabled) {
+  color: CanvasText;
+  background: transparent;
+}
+
+.progress {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+  color: GrayText;
+  line-height: 1.5;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.progress li {
+  margin: 0;
+}
+
 .badge {
   font-size: 11px;
   padding: 2px 7px;

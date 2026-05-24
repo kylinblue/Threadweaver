@@ -14,7 +14,7 @@ Ignore:
 - "+1" or "thanks" posts without substance
 - Duplicate information
 
-Provide a concise summary highlighting the most important information. Do not editorialize about whether the thread looks complete or whether more context would help — just summarize what you are given.`
+Provide a concise summary highlighting the most important information. Do not editorialize about whether the thread looks complete or whether more context would help — just summarize what you are given. Begin your response directly with the summary content; do not include preambles like "Okay, let me analyze" or "Here's the summary".`
 
 const META_SUMMARIZE_SYSTEM = `You are condensing multiple summaries of a forum thread into a single coherent summary.
 
@@ -22,7 +22,9 @@ Produce a unified summary that:
 - Maintains all key information
 - Removes redundancy
 - Preserves chronological flow if relevant
-- Highlights main themes and conclusions`
+- Highlights main themes and conclusions
+
+Begin your response directly with the unified summary; do not include preambles.`
 
 export interface BatchInfo {
   /** 0-based index of this batch. */
@@ -76,7 +78,7 @@ export function buildMetaSummarizeMessages(summaries: string[]): ChatMessage[] {
 
 const ANSWER_QUERY_SYSTEM = `You are helping a user understand a forum thread.
 
-Use the thread summary and the supplied relevant posts to answer the user's question. Cite specific posts when relevant (e.g., "In post #42, user X mentioned…"). If the answer is not present in the supplied context, say so plainly rather than guessing.`
+Use the thread summary and the supplied relevant posts to answer the user's question. Cite specific posts when relevant (e.g., "In post #42, user X mentioned…"). If the answer is not present in the supplied context, say so plainly rather than guessing. Begin your response directly with the answer; do not include preambles like "Okay, let me think about this" or "Sure, here's the answer".`
 
 export function buildAnswerQueryMessages(
   query: string,

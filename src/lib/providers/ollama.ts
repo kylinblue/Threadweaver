@@ -64,6 +64,10 @@ export class OllamaProvider implements LLMProvider {
       model: opts.model ?? this.defaultModel,
       messages,
       stream: false,
+      // Ollama 0.5+: native suppression of reasoning channel on thinking models
+      // (deepseek-r1, qwen3, gpt-oss, qwq). Older Ollama silently ignores the
+      // field, so we still post-process for inline <think>...</think> tags.
+      think: false,
       options: {
         ...(opts.temperature !== undefined && { temperature: opts.temperature }),
         ...(opts.maxTokens !== undefined && { num_predict: opts.maxTokens }),
@@ -96,7 +100,7 @@ export class OllamaProvider implements LLMProvider {
 
     const data = (await res.json()) as OllamaChatResponse
     return {
-      text: data.message?.content ?? '',
+      text: stripThinkTags(data.message?.content ?? ''),
       usage: {
         promptTokens: data.prompt_eval_count ?? 0,
         completionTokens: data.eval_count ?? 0,
@@ -112,6 +116,7 @@ export class OllamaProvider implements LLMProvider {
       model: opts.model ?? this.defaultModel,
       messages,
       stream: true,
+      think: false,
       options: {
         ...(opts.temperature !== undefined && { temperature: opts.temperature }),
         ...(opts.maxTokens !== undefined && { num_predict: opts.maxTokens }),
@@ -135,6 +140,7 @@ export class OllamaProvider implements LLMProvider {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    const filter = new ThinkFilter()
 
     while (true) {
       const { value, done } = await reader.read()
@@ -148,10 +154,19 @@ export class OllamaProvider implements LLMProvider {
         if (!line) continue
         const chunk = JSON.parse(line) as OllamaChatResponse
         const piece = chunk.message?.content
-        if (piece) yield piece
-        if (chunk.done) return
+        if (piece) {
+          const filtered = filter.push(piece)
+          if (filtered) yield filtered
+        }
+        if (chunk.done) {
+          const tail = filter.flush()
+          if (tail) yield tail
+          return
+        }
       }
     }
+    const tail = filter.flush()
+    if (tail) yield tail
   }
 
   async countTokens(text: string): Promise<number> {
@@ -211,3 +226,104 @@ export type VerifyResult =
   | { kind: 'empty' }
   | { kind: 'origin-blocked'; models: string[] }
   | { kind: 'unreachable'; msg: string }
+
+/**
+ * Strip <think>...</think> and <thinking>...</thinking> reasoning blocks
+ * emitted inline by deepseek-r1, qwen3, qwq, and similar thinking models.
+ * Multiple blocks supported. Trims leading whitespace left behind.
+ */
+function stripThinkTags(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>\s*/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, '')
+    .trimStart()
+}
+
+const THINK_OPEN = '<think>'
+const THINK_CLOSE = '</think>'
+
+/**
+ * Stateful streaming filter for <think>...</think> blocks. Three states:
+ *   - 'pre'      : haven't decided yet, may start with <think>; buffer
+ *   - 'thinking' : inside a think block; discard until </think>
+ *   - 'output'   : passthrough mode
+ *
+ * Holds back trailing chars that could be the start of an open/close tag so
+ * we never yield a partial tag. Multiple think blocks aren't expected in
+ * practice (Ollama emits one per turn) and aren't supported.
+ */
+class ThinkFilter {
+  private state: 'pre' | 'thinking' | 'output' = 'pre'
+  private buf = ''
+  private readonly preLookahead = 32
+
+  push(piece: string): string {
+    if (this.state === 'output') return piece
+    this.buf += piece
+
+    if (this.state === 'pre') {
+      const trimmed = this.buf.trimStart()
+      if (trimmed.startsWith(THINK_OPEN)) {
+        const start = this.buf.indexOf(THINK_OPEN)
+        this.buf = this.buf.slice(start + THINK_OPEN.length)
+        this.state = 'thinking'
+      } else if (this.buf.length < this.preLookahead) {
+        // wait for more — could still resolve to <think>
+        return ''
+      } else if (mightStartThink(this.buf)) {
+        // we've seen <th... or similar — could still complete to <think>
+        return ''
+      } else {
+        // definitely no think block — flush + passthrough
+        this.state = 'output'
+        const out = this.buf
+        this.buf = ''
+        return out
+      }
+    }
+
+    if (this.state === 'thinking') {
+      const closeIdx = this.buf.indexOf(THINK_CLOSE)
+      if (closeIdx === -1) {
+        // Could end mid-closing-tag; hold back enough chars to be safe.
+        const holdBack = Math.min(THINK_CLOSE.length - 1, this.buf.length)
+        this.buf = this.buf.slice(this.buf.length - holdBack)
+        return ''
+      }
+      const after = this.buf.slice(closeIdx + THINK_CLOSE.length).replace(/^\s+/, '')
+      this.buf = ''
+      this.state = 'output'
+      return after
+    }
+
+    return ''
+  }
+
+  flush(): string {
+    if (this.state === 'output') {
+      const out = this.buf
+      this.buf = ''
+      return out
+    }
+    // Still 'pre' (never crossed lookahead) or 'thinking' (never saw close).
+    // If 'pre', buffered content is real output that we held back — emit it.
+    if (this.state === 'pre') {
+      const out = this.buf
+      this.buf = ''
+      this.state = 'output'
+      return out
+    }
+    // 'thinking' without close: discard, model presumably aborted mid-reasoning.
+    this.buf = ''
+    return ''
+  }
+}
+
+function mightStartThink(s: string): boolean {
+  // Returns true if the tail of `s` could be the start of "<think>"
+  const tail = s.slice(-THINK_OPEN.length)
+  for (let i = 1; i <= tail.length; i++) {
+    if (THINK_OPEN.startsWith(tail.slice(-i))) return true
+  }
+  return false
+}

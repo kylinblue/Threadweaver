@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getLatestSummary, searchPostsByThread } from '../lib/db'
+import { getLatestSummary, getPostsByThread, searchPostsByThread } from '../lib/db'
 import { renderMarkdown } from '../lib/markdown'
 import type {
   ContentRequest,
@@ -64,6 +64,7 @@ export function App() {
   const [detection, setDetection] = useState<Detection>({ kind: 'probing' })
   const [analysis, setAnalysis] = useState<Analysis>({ kind: 'idle' })
   const [cachedSummary, setCachedSummary] = useState<string>('')
+  const [indexedPostCount, setIndexedPostCount] = useState<number>(0)
   const [query, setQuery] = useState<Query>({ kind: 'idle' })
   const [includeAllPages, setIncludeAllPages] = useState<boolean>(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -185,9 +186,11 @@ export function App() {
   useEffect(() => {
     if (!canonicalUrl) {
       setCachedSummary('')
+      setIndexedPostCount(0)
       return
     }
     void getLatestSummary(canonicalUrl).then((s) => setCachedSummary(s?.content ?? ''))
+    void getPostsByThread(canonicalUrl).then((posts) => setIndexedPostCount(posts.length))
   }, [canonicalUrl, analysis.kind === 'done'])
 
   // Reset query state when the thread changes.
@@ -275,7 +278,9 @@ export function App() {
           detection.kind === 'ready' &&
           (cachedSummary.length > 0 || analysis.kind === 'done')
         }
+        indexedPostCount={indexedPostCount}
         postsOnPage={detection.kind === 'ready' ? detection.posts.length : 0}
+        totalPages={detection.kind === 'ready' ? detection.pagination.totalPages : 1}
         hasSummary={cachedSummary.length > 0}
         onAsk={onAsk}
         onCancel={onCancelQuery}
@@ -533,14 +538,18 @@ function Markdown({ text }: { text: string }) {
 function QueryCard({
   query,
   canAsk,
+  indexedPostCount,
   postsOnPage,
+  totalPages,
   hasSummary,
   onAsk,
   onCancel,
 }: {
   query: Query
   canAsk: boolean
+  indexedPostCount: number
   postsOnPage: number
+  totalPages: number
   hasSummary: boolean
   onAsk: (q: string) => void
   onCancel: () => void
@@ -561,16 +570,25 @@ function QueryCard({
     }
   }
 
+  // A multi-page thread whose indexed count doesn't exceed current page posts
+  // means the user analyzed without "Include all pages" — answers will be
+  // current-page-only and they may want to re-analyze with all pages.
+  const isCurrentPageOnly = totalPages > 1 && indexedPostCount <= postsOnPage
+
   return (
     <section className="card">
       <h2>Ask</h2>
       {!hasSummary && (
         <p className="hint">Analyze the thread first to enable query mode.</p>
       )}
-      <p className="hint">
-        Answering based on <strong>{postsOnPage}</strong> post{postsOnPage === 1 ? '' : 's'} on this page.
-        Multi-page threads aren't yet merged.
-      </p>
+      {hasSummary && (
+        <p className="hint">
+          Answering based on <strong>{indexedPostCount}</strong> indexed post{indexedPostCount === 1 ? '' : 's'}.
+          {isCurrentPageOnly && (
+            <> Re-analyze with <em>Include all pages</em> for full-thread context.</>
+          )}
+        </p>
+      )}
       <textarea
         rows={3}
         placeholder="Ask a question about this thread… (Ctrl+Enter to submit)"

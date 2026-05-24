@@ -4,7 +4,7 @@ Out-of-scope items captured during development. Not blockers for the current pha
 
 ## Vision models: send post images alongside text
 
-When the selected Ollama model supports image input (e.g. `llava`, `llama3.2-vision`, `gemma3`), include images from posts in the prompt rather than dropping them. Many forum posts carry meaningful information in images — technical diagrams, screenshots, photos — that's currently invisible to the summarizer.
+When the selected Ollama model supports image input (e.g. `gemma4`, `llava`, `llama3.2-vision`, `qwen2.5-vl`), include images from posts in the prompt rather than dropping them. (Gemma 4 confirmed solid as a vision model during 2026-05 testing.) Many forum posts carry meaningful information in images — technical diagrams, screenshots, photos — that's currently invisible to the summarizer.
 
 Implementation pointers:
 - **Capability detection.** `POST /api/show {"model": "<name>"}` returns a `capabilities` array; check for `"vision"`. Cache result per model. Surface as a small badge in settings ("vision capable").

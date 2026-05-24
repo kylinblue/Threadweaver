@@ -48,7 +48,7 @@ label {
   color: GrayText;
 }
 
-input, select {
+input, select, textarea {
   font: inherit;
   padding: 5px 7px;
   border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
@@ -57,7 +57,13 @@ input, select {
   color: CanvasText;
 }
 
-input:focus, select:focus {
+textarea {
+  resize: vertical;
+  min-height: 50px;
+  font-family: inherit;
+}
+
+input:focus, select:focus, textarea:focus {
   outline: 2px solid Highlight;
   outline-offset: -1px;
 }

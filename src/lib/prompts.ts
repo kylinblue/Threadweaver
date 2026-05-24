@@ -56,3 +56,33 @@ export function buildMetaSummarizeMessages(summaries: string[]): ChatMessage[] {
     { role: 'user', content: `Previous summaries:\n\n${text}\n\nUnified summary:` },
   ]
 }
+
+const ANSWER_QUERY_SYSTEM = `You are helping a user understand a forum thread.
+
+Use the thread summary and the supplied relevant posts to answer the user's question. Cite specific posts when relevant (e.g., "In post #42, user X mentioned…"). If the answer is not present in the supplied context, say so plainly rather than guessing.`
+
+export function buildAnswerQueryMessages(
+  query: string,
+  summary: string,
+  relevantPosts: Post[],
+): ChatMessage[] {
+  const postsBlock = relevantPosts.length
+    ? '\n\nRelevant posts:\n' +
+      relevantPosts
+        .map(
+          (p) =>
+            `Post #${p.position} by ${p.author}${p.timestamp ? ` (${p.timestamp})` : ''}:\n${p.content}`,
+        )
+        .join('\n\n')
+    : ''
+
+  const userContent = `Thread summary:
+${summary || '(no summary available yet)'}${postsBlock}
+
+User question: ${query}`
+
+  return [
+    { role: 'system', content: ANSWER_QUERY_SYSTEM },
+    { role: 'user', content: userContent },
+  ]
+}

@@ -119,3 +119,49 @@ export async function getLatestSummary(
   if (metas.length) return metas[metas.length - 1]
   return all[all.length - 1]
 }
+
+const STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from',
+  'has', 'have', 'how', 'i', 'in', 'is', 'it', 'its', 'of', 'on', 'or',
+  'that', 'the', 'this', 'to', 'was', 'were', 'what', 'when', 'where',
+  'which', 'who', 'why', 'will', 'with', 'you', 'your',
+])
+
+export async function getPostsByThread(threadUrl: string): Promise<PostRecord[]> {
+  const db = await getDB()
+  return db.getAllFromIndex('posts', 'by-thread', threadUrl)
+}
+
+/**
+ * Rank posts by how many query terms (≥3 chars, non-stopword) they contain.
+ * Returns top-N posts with at least one match, in score-descending order.
+ */
+export async function searchPostsByThread(
+  threadUrl: string,
+  query: string,
+  limit: number = 10,
+): Promise<PostRecord[]> {
+  const terms = Array.from(
+    new Set(
+      query
+        .toLowerCase()
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((t) => t.length >= 3 && !STOPWORDS.has(t)),
+    ),
+  )
+  if (terms.length === 0) return []
+
+  const posts = await getPostsByThread(threadUrl)
+  const scored = posts
+    .map((p) => {
+      const haystack = p.content.toLowerCase()
+      let score = 0
+      for (const t of terms) {
+        if (haystack.includes(t)) score++
+      }
+      return { post: p, score }
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || a.post.position - b.post.position)
+  return scored.slice(0, limit).map((s) => s.post)
+}

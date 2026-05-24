@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getLatestSummary } from '../lib/db'
+import { getLatestSummary, searchPostsByThread } from '../lib/db'
 import type { ContentRequest, ContentResponse } from '../lib/messages'
+import { buildAnswerQueryMessages } from '../lib/prompts'
 import { OllamaProvider } from '../lib/providers/ollama'
 import type { ChatMessage } from '../lib/providers/types'
 import {
@@ -43,12 +44,21 @@ type Analysis =
   | { kind: 'done'; finalSummary: string; source: 'thread' | 'page' }
   | { kind: 'error'; msg: string }
 
+type Query =
+  | { kind: 'idle' }
+  | { kind: 'running'; question: string; answer: string }
+  | { kind: 'done'; question: string; answer: string }
+  | { kind: 'error'; question: string; msg: string }
+
 export function App() {
   const [settings, setLocalSettings] = useState<Settings | null>(null)
   const [conn, setConn] = useState<ConnState>({ kind: 'idle' })
   const [detection, setDetection] = useState<Detection>({ kind: 'probing' })
   const [analysis, setAnalysis] = useState<Analysis>({ kind: 'idle' })
+  const [cachedSummary, setCachedSummary] = useState<string>('')
+  const [query, setQuery] = useState<Query>({ kind: 'idle' })
   const abortRef = useRef<AbortController | null>(null)
+  const queryAbortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     getSettings().then(setLocalSettings)
@@ -143,6 +153,63 @@ export function App() {
     void probeActiveTab(setDetection, setAnalysis)
   }, [])
 
+  // Load the cached summary whenever the active thread changes or a new
+  // analysis completes (writes a new 'final' record to IndexedDB).
+  useEffect(() => {
+    if (detection.kind !== 'ready') {
+      setCachedSummary('')
+      return
+    }
+    void getLatestSummary(detection.url).then((s) => setCachedSummary(s?.content ?? ''))
+  }, [detection.kind === 'ready' ? detection.url : null, analysis.kind === 'done'])
+
+  // Reset query state when the thread changes.
+  useEffect(() => {
+    setQuery({ kind: 'idle' })
+  }, [detection.kind === 'ready' ? detection.url : null])
+
+  const onAsk = useCallback(
+    async (question: string) => {
+      if (!settings || detection.kind !== 'ready') return
+      const trimmed = question.trim()
+      if (!trimmed) return
+
+      queryAbortRef.current?.abort()
+      const abort = new AbortController()
+      queryAbortRef.current = abort
+      setQuery({ kind: 'running', question: trimmed, answer: '' })
+
+      try {
+        const relevantPosts = await searchPostsByThread(detection.url, trimmed)
+        const messages = buildAnswerQueryMessages(trimmed, cachedSummary, relevantPosts)
+        const provider = new OllamaProvider(settings.ollama.baseUrl)
+
+        let acc = ''
+        for await (const chunk of provider.generateStream(messages, {
+          model: settings.ollama.model,
+          abortSignal: abort.signal,
+        })) {
+          acc += chunk
+          setQuery({ kind: 'running', question: trimmed, answer: acc })
+        }
+        setQuery({ kind: 'done', question: trimmed, answer: acc })
+      } catch (err) {
+        setQuery({
+          kind: 'error',
+          question: trimmed,
+          msg: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        queryAbortRef.current = null
+      }
+    },
+    [settings, detection, cachedSummary],
+  )
+
+  const onCancelQuery = useCallback(() => {
+    queryAbortRef.current?.abort()
+  }, [])
+
   if (!settings) return <main><p className="hint">Loading…</p></main>
 
   return (
@@ -167,7 +234,20 @@ export function App() {
         onRefresh={onRefresh}
       />
 
-      <SummaryCard analysis={analysis} detectionUrl={detection.kind === 'ready' ? detection.url : null} />
+      <SummaryCard analysis={analysis} cachedSummary={cachedSummary} />
+
+      <QueryCard
+        query={query}
+        canAsk={
+          conn.kind === 'ok' &&
+          detection.kind === 'ready' &&
+          (cachedSummary.length > 0 || analysis.kind === 'done')
+        }
+        postsOnPage={detection.kind === 'ready' ? detection.posts.length : 0}
+        hasSummary={cachedSummary.length > 0}
+        onAsk={onAsk}
+        onCancel={onCancelQuery}
+      />
     </main>
   )
 }
@@ -347,25 +427,18 @@ function ProgressList({ events }: { events: ProgressEvent[] }) {
 
 function SummaryCard({
   analysis,
-  detectionUrl,
+  cachedSummary,
 }: {
   analysis: Analysis
-  detectionUrl: string | null
+  cachedSummary: string
 }) {
-  const [cached, setCached] = useState<string>('')
-
-  useEffect(() => {
-    if (!detectionUrl) { setCached(''); return }
-    getLatestSummary(detectionUrl).then((s) => setCached(s?.content ?? ''))
-  }, [detectionUrl])
-
   const live =
     analysis.kind === 'thread-running' ? analysis.rollingSummary
     : analysis.kind === 'done' ? analysis.finalSummary
     : analysis.kind === 'error' ? ''
     : ''
 
-  const display = live || cached
+  const display = live || cachedSummary
   if (!display && analysis.kind !== 'error') return null
 
   return (
@@ -374,10 +447,77 @@ function SummaryCard({
         <h2>Summary</h2>
         {analysis.kind === 'thread-running' && <span className="badge">live</span>}
         {analysis.kind === 'done' && <span className="badge ok">final</span>}
-        {!live && cached && <span className="badge">cached</span>}
+        {!live && cachedSummary && <span className="badge">cached</span>}
       </div>
       {analysis.kind === 'error' && <p className="hint error">{analysis.msg}</p>}
       {display && <pre className="summary">{display}</pre>}
+    </section>
+  )
+}
+
+function QueryCard({
+  query,
+  canAsk,
+  postsOnPage,
+  hasSummary,
+  onAsk,
+  onCancel,
+}: {
+  query: Query
+  canAsk: boolean
+  postsOnPage: number
+  hasSummary: boolean
+  onAsk: (q: string) => void
+  onCancel: () => void
+}) {
+  const [draft, setDraft] = useState('')
+  const running = query.kind === 'running'
+
+  const submit = () => {
+    if (!canAsk || running) return
+    if (!draft.trim()) return
+    onAsk(draft)
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault()
+      submit()
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>Ask</h2>
+      {!hasSummary && (
+        <p className="hint">Analyze the thread first to enable query mode.</p>
+      )}
+      <p className="hint">
+        Answering based on <strong>{postsOnPage}</strong> post{postsOnPage === 1 ? '' : 's'} on this page.
+        Multi-page threads aren't yet merged.
+      </p>
+      <textarea
+        rows={3}
+        placeholder="Ask a question about this thread… (Ctrl+Enter to submit)"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={onKeyDown}
+        disabled={!canAsk || running}
+      />
+      <div className="row">
+        <button
+          className="primary"
+          onClick={submit}
+          disabled={!canAsk || running || !draft.trim()}
+        >
+          {running ? 'Thinking…' : 'Ask'}
+        </button>
+        {running && <button onClick={onCancel}>Cancel</button>}
+      </div>
+      {query.kind === 'error' && <p className="hint error">{query.msg}</p>}
+      {(query.kind === 'running' || query.kind === 'done') && query.answer && (
+        <pre className="summary">{query.answer}</pre>
+      )}
     </section>
   )
 }

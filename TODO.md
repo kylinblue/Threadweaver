@@ -2,6 +2,14 @@
 
 Out-of-scope items captured during development. Not blockers for the current phase.
 
+## phpBB phantom post (extractor overcount)
+
+On f-16.net (phpBB), `extractPosts` finds ~1 extra "post" per page beyond what the forum actually has — observed 2026-05-24 on a 31-post / 3-page thread reporting 16 + 16 + 2 = 34 detected. The phantom has enough text to clear `MIN_POST_LENGTH=10`, so it reaches the summarizer.
+
+Hypothesis: the `.post` selector matches an element that isn't a real post (likely the "Post a reply" form region, a topic-header wrapper, or a hidden preview template). Confirm by inspecting DOM on f-16.net and tightening the selector — e.g. require `.post.bg1, .post.bg2` (alternating-row classes phpBB applies to real posts in most themes) or `div.post[id^="p"]` (real posts have `id="p<post_id>"`).
+
+Related: [src/content/selectors.ts](src/content/selectors.ts), [src/content/extract.ts](src/content/extract.ts).
+
 ## Multi-page threads
 
 The Phase 2 extractor only sees posts on the currently rendered page. Long forum threads paginate (phpBB: typically 10-25 posts/page; XenForo: 20/page; vBulletin: 10/page) or lazy-load (Discourse, modern XenForo with infinite scroll). A 100-reply thread split across 4 pages currently gets only the visible page summarized.

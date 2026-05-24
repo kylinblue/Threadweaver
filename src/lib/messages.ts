@@ -1,5 +1,11 @@
 import type { ForumPlatform, Post } from './types'
 
+export interface PaginationInfo {
+  currentPage: number
+  totalPages: number
+  canonicalUrl: string
+}
+
 export type ContentRequest =
   | { type: 'GET_PAGE_TEXT' }
   | { type: 'GET_POSTS' }
@@ -12,4 +18,5 @@ export type ContentResponse =
       title: string
       platform: ForumPlatform
       posts: Post[]
+      pagination: PaginationInfo
     }

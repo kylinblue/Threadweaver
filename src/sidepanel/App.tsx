@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getLatestSummary, searchPostsByThread } from '../lib/db'
 import { renderMarkdown } from '../lib/markdown'
-import type { ContentRequest, ContentResponse } from '../lib/messages'
+import type {
+  ContentRequest,
+  ContentResponse,
+  PaginationInfo,
+} from '../lib/messages'
 import { buildAnswerQueryMessages } from '../lib/prompts'
 import { OllamaProvider } from '../lib/providers/ollama'
 import type { ChatMessage } from '../lib/providers/types'
@@ -36,6 +40,7 @@ type Detection =
       title: string
       platform: ForumPlatform
       posts: Post[]
+      pagination: PaginationInfo
     }
 
 type Analysis =
@@ -113,7 +118,11 @@ export function App() {
     try {
       const gen = summarizeThread(
         provider,
-        { url: detection.url, title: detection.title, platform: detection.platform },
+        {
+          url: detection.pagination.canonicalUrl,
+          title: detection.title,
+          platform: detection.platform,
+        },
         detection.posts,
         { model, abortSignal: abort.signal },
       )
@@ -156,18 +165,21 @@ export function App() {
 
   // Load the cached summary whenever the active thread changes or a new
   // analysis completes (writes a new 'final' record to IndexedDB).
+  // Keyed by canonical thread URL so different pages of the same thread share.
+  const canonicalUrl =
+    detection.kind === 'ready' ? detection.pagination.canonicalUrl : null
   useEffect(() => {
-    if (detection.kind !== 'ready') {
+    if (!canonicalUrl) {
       setCachedSummary('')
       return
     }
-    void getLatestSummary(detection.url).then((s) => setCachedSummary(s?.content ?? ''))
-  }, [detection.kind === 'ready' ? detection.url : null, analysis.kind === 'done'])
+    void getLatestSummary(canonicalUrl).then((s) => setCachedSummary(s?.content ?? ''))
+  }, [canonicalUrl, analysis.kind === 'done'])
 
   // Reset query state when the thread changes.
   useEffect(() => {
     setQuery({ kind: 'idle' })
-  }, [detection.kind === 'ready' ? detection.url : null])
+  }, [canonicalUrl])
 
   const onAsk = useCallback(
     async (question: string) => {
@@ -181,7 +193,10 @@ export function App() {
       setQuery({ kind: 'running', question: trimmed, answer: '' })
 
       try {
-        const relevantPosts = await searchPostsByThread(detection.url, trimmed)
+        const relevantPosts = await searchPostsByThread(
+          detection.pagination.canonicalUrl,
+          trimmed,
+        )
         const messages = buildAnswerQueryMessages(trimmed, cachedSummary, relevantPosts)
         const provider = new OllamaProvider(settings.ollama.baseUrl)
 
@@ -367,9 +382,17 @@ function ThreadCard({
             </span>
             {' '}
             {detection.posts.length > 0
-              ? <>{detection.posts.length} posts detected</>
+              ? <>{detection.posts.length} posts on this page</>
               : <>no posts detected — will fall back to summarizing page text</>}
+            {detection.pagination.totalPages > 1 && (
+              <> · page {detection.pagination.currentPage} of {detection.pagination.totalPages}</>
+            )}
           </p>
+          {detection.pagination.totalPages > 1 && (
+            <p className="hint">
+              Multi-page thread detected. Each page summarizes independently for now; cross-page merging is coming.
+            </p>
+          )}
         </>
       )}
 
@@ -588,6 +611,7 @@ async function probeActiveTab(
       title: res.title,
       platform: res.platform,
       posts: res.posts,
+      pagination: res.pagination,
     })
   } catch {
     setDetection({ kind: 'no-content-script' })

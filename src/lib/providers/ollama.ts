@@ -157,4 +157,57 @@ export class OllamaProvider implements LLMProvider {
   async countTokens(text: string): Promise<number> {
     return Math.ceil(text.length / 4)
   }
+
+  /**
+   * Probe the daemon to discover models AND verify the origin allowlist.
+   *
+   * GET /api/tags can succeed when POSTs are 403'd (Ollama's origin check is
+   * only applied to mutating methods). To catch that case in "Test connection",
+   * we follow up with a POST to /api/show — lightweight (no model load),
+   * but exercises the same origin enforcement path as /api/chat.
+   */
+  async verifyAccess(): Promise<VerifyResult> {
+    let models: string[]
+    try {
+      models = await this.listModels()
+    } catch (err) {
+      const msg = err instanceof ProviderError ? err.message
+        : err instanceof Error ? err.message
+        : String(err)
+      return { kind: 'unreachable', msg }
+    }
+
+    if (models.length === 0) return { kind: 'empty' }
+
+    let probe: Response
+    try {
+      probe = await fetch(this.url('/api/show'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: models[0] }),
+      })
+    } catch (err) {
+      return {
+        kind: 'unreachable',
+        msg: err instanceof Error ? err.message : String(err),
+      }
+    }
+
+    if (probe.status === 403) return { kind: 'origin-blocked', models }
+    if (!probe.ok) {
+      const detail = await probe.text().catch(() => '')
+      return {
+        kind: 'unreachable',
+        msg: `Ollama /api/show returned ${probe.status}: ${detail}`,
+      }
+    }
+
+    return { kind: 'ok', models }
+  }
 }
+
+export type VerifyResult =
+  | { kind: 'ok'; models: string[] }
+  | { kind: 'empty' }
+  | { kind: 'origin-blocked'; models: string[] }
+  | { kind: 'unreachable'; msg: string }

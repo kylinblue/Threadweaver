@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getLatestSummary } from '../lib/db'
 import type { ContentRequest, ContentResponse } from '../lib/messages'
 import { OllamaProvider } from '../lib/providers/ollama'
-import { ProviderError, type ChatMessage } from '../lib/providers/types'
+import type { ChatMessage } from '../lib/providers/types'
 import {
   getSettings,
   setSettings,
@@ -22,6 +22,7 @@ type ConnState =
   | { kind: 'testing' }
   | { kind: 'ok'; models: string[] }
   | { kind: 'empty' }
+  | { kind: 'origin-blocked'; models: string[] }
   | { kind: 'unreachable'; msg: string }
 
 type Detection =
@@ -57,6 +58,15 @@ export function App() {
   useEffect(() => {
     if (settings) void testConnection(settings, setConn)
   }, [settings?.ollama.baseUrl])
+
+  // Auto-pick: if the configured model isn't installed but others are,
+  // silently switch to the first available so the user gets a working setup.
+  useEffect(() => {
+    if (!settings) return
+    if (conn.kind !== 'ok') return
+    if (conn.models.includes(settings.ollama.model)) return
+    void updateOllama({ model: conn.models[0] })
+  }, [conn, settings?.ollama.model])
 
   useEffect(() => {
     void probeActiveTab(setDetection, setAnalysis)
@@ -221,6 +231,13 @@ function SettingsCard({
           then click <strong>Test connection</strong> again.
         </p>
       )}
+      {conn.kind === 'origin-blocked' && (
+        <p className="hint error">
+          Ollama is running but blocks requests from this extension's origin (returned 403).
+          Set <code>OLLAMA_ORIGINS</code> and restart Ollama from the tray:
+          <code className="block">[Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "chrome-extension://*", "User")</code>
+        </p>
+      )}
       {conn.kind === 'unreachable' && <p className="hint error">{conn.msg}</p>}
     </section>
   )
@@ -371,6 +388,7 @@ function ConnBadge({ state }: { state: ConnState }) {
     case 'testing': return <span className="badge">…</span>
     case 'ok': return <span className="badge ok">connected · {state.models.length} model{state.models.length === 1 ? '' : 's'}</span>
     case 'empty': return <span className="badge warn">no models</span>
+    case 'origin-blocked': return <span className="badge error">blocked (403)</span>
     case 'unreachable': return <span className="badge error">unreachable</span>
   }
 }
@@ -396,16 +414,8 @@ async function testConnection(
 ) {
   setConn({ kind: 'testing' })
   const provider = new OllamaProvider(settings.ollama.baseUrl)
-  try {
-    const models = await provider.listModels()
-    setConn(models.length === 0 ? { kind: 'empty' } : { kind: 'ok', models })
-  } catch (err) {
-    const msg =
-      err instanceof ProviderError ? err.message
-      : err instanceof Error ? err.message
-      : String(err)
-    setConn({ kind: 'unreachable', msg })
-  }
+  const result = await provider.verifyAccess()
+  setConn(result)
 }
 
 async function probeActiveTab(

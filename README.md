@@ -1,73 +1,92 @@
-# React + TypeScript + Vite
+# ThreadWeaver
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Chrome side-panel extension that summarizes long forum threads using a local LLM.
 
-Currently, two official plugins are available:
+Reads forum posts directly from the page you're viewing — including auth-walled / member-only forums where your existing browser session is doing the work — chunks them, runs them through [Ollama](https://ollama.com), and gives you a rolling summary plus a query box for follow-up questions. All data stays on your machine.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+**Status:** early development, local-only. Built on the side-panel API so the summary stays put while you keep reading.
 
-## React Compiler
+## Supported forums
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Post extraction is tuned for phpBB, XenForo, vBulletin, Discourse, and Invision Community, plus a generic fallback. Currently extracts posts on the **visible page only** — multi-page threads aren't merged yet ([TODO.md](TODO.md)).
 
-## Expanding the ESLint configuration
+## Setup
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+ThreadWeaver depends on a local Ollama daemon. Set that up first, then load the extension.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### 1. Install Ollama and pull a model
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Install from [ollama.com](https://ollama.com), then pull at least one chat-capable model. Small fast option for dev:
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```powershell
+ollama pull llama3.2:3b
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### 2. Allow chrome-extension origin (required)
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Ollama's default origin allowlist blocks POSTs from `chrome-extension://` URLs and returns 403. Whitelist them once:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```powershell
+[Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "chrome-extension://*", "User")
 ```
+
+Then **fully quit Ollama** (tray icon → Quit) and relaunch — the daemon only reads the env var at startup.
+
+The extension's Test Connection button surfaces a clear `blocked (403)` badge with this command if you forget.
+
+### 3. Build and load the extension
+
+```powershell
+npm install
+npm run build
+```
+
+Then in Chrome:
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. **Load unpacked** → select this repo's `dist/` folder
+
+Click the ThreadWeaver toolbar icon (or pin it first) to open the side panel.
+
+## Usage
+
+1. Navigate to a forum thread.
+2. Open the side panel — current page is auto-detected, showing the platform and post count.
+3. Click **Analyze thread** to chunk-summarize all posts on the page. The summary persists across panel reloads.
+4. Ask follow-up questions in the **Ask** card — answers stream in and cite specific posts.
+
+## Development
+
+Hot-reload dev server (requires re-loading the unpacked extension after rebuilds):
+
+```powershell
+npm run dev
+```
+
+Production build (what you load in `chrome://extensions`):
+
+```powershell
+npm run build
+```
+
+Lint:
+
+```powershell
+npm run lint
+```
+
+### Architecture
+
+- `src/sidepanel/` — React UI (side panel is the primary surface)
+- `src/content/` — content script: forum platform detection + post extraction
+- `src/background/` — service worker (just wires the action button to open the panel)
+- `src/lib/providers/` — `LLMProvider` interface + `OllamaProvider`
+- `src/lib/summarizer.ts` — chunk → summarize → meta-summarize loop
+- `src/lib/db.ts` — IndexedDB persistence (threads, posts, summaries)
+
+## Roadmap
+
+- Multi-page thread support (see [TODO.md](TODO.md))
+- Remote LLM providers (OpenAI / Anthropic / Gemini / xAI Grok)
+- Per-provider rate limiting + retry + cost estimates

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getLatestSummary, searchPostsByThread } from '../lib/db'
+import { renderMarkdown } from '../lib/markdown'
 import type { ContentRequest, ContentResponse } from '../lib/messages'
 import { buildAnswerQueryMessages } from '../lib/prompts'
 import { OllamaProvider } from '../lib/providers/ollama'
@@ -450,9 +451,14 @@ function SummaryCard({
         {!live && cachedSummary && <span className="badge">cached</span>}
       </div>
       {analysis.kind === 'error' && <p className="hint error">{analysis.msg}</p>}
-      {display && <pre className="summary">{display}</pre>}
+      {display && <Markdown text={display} />}
     </section>
   )
+}
+
+function Markdown({ text }: { text: string }) {
+  const html = useMemo(() => renderMarkdown(text), [text])
+  return <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
 }
 
 function QueryCard({
@@ -516,7 +522,7 @@ function QueryCard({
       </div>
       {query.kind === 'error' && <p className="hint error">{query.msg}</p>}
       {(query.kind === 'running' || query.kind === 'done') && query.answer && (
-        <pre className="summary">{query.answer}</pre>
+        <Markdown text={query.answer} />
       )}
     </section>
   )

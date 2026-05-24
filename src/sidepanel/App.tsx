@@ -6,6 +6,7 @@ import type {
   ContentResponse,
   PaginationInfo,
 } from '../lib/messages'
+import { derivePageUrls } from '../lib/pagination'
 import { buildAnswerQueryMessages } from '../lib/prompts'
 import { OllamaProvider } from '../lib/providers/ollama'
 import type { ChatMessage } from '../lib/providers/types'
@@ -45,6 +46,7 @@ type Detection =
 
 type Analysis =
   | { kind: 'idle' }
+  | { kind: 'fetching'; message: string }
   | { kind: 'page-running' }
   | { kind: 'thread-running'; progress: ProgressEvent[]; rollingSummary: string }
   | { kind: 'done'; finalSummary: string; source: 'thread' | 'page' }
@@ -63,6 +65,7 @@ export function App() {
   const [analysis, setAnalysis] = useState<Analysis>({ kind: 'idle' })
   const [cachedSummary, setCachedSummary] = useState<string>('')
   const [query, setQuery] = useState<Query>({ kind: 'idle' })
+  const [includeAllPages, setIncludeAllPages] = useState<boolean>(false)
   const abortRef = useRef<AbortController | null>(null)
   const queryAbortRef = useRef<AbortController | null>(null)
 
@@ -113,9 +116,20 @@ export function App() {
     abortRef.current?.abort()
     const abort = new AbortController()
     abortRef.current = abort
-    setAnalysis({ kind: 'thread-running', progress: [], rollingSummary: '' })
 
     try {
+      let postsToAnalyze = detection.posts
+
+      if (includeAllPages && detection.pagination.totalPages > 1) {
+        postsToAnalyze = await fetchAllPagesPosts(
+          detection,
+          (msg) => setAnalysis({ kind: 'fetching', message: msg }),
+          abort.signal,
+        )
+      }
+
+      setAnalysis({ kind: 'thread-running', progress: [], rollingSummary: '' })
+
       const gen = summarizeThread(
         provider,
         {
@@ -123,7 +137,7 @@ export function App() {
           title: detection.title,
           platform: detection.platform,
         },
-        detection.posts,
+        postsToAnalyze,
         { model, abortSignal: abort.signal },
       )
 
@@ -153,7 +167,7 @@ export function App() {
     } finally {
       abortRef.current = null
     }
-  }, [settings, detection])
+  }, [settings, detection, includeAllPages])
 
   const onCancel = useCallback(() => {
     abortRef.current?.abort()
@@ -245,6 +259,8 @@ export function App() {
         detection={detection}
         analysis={analysis}
         connReady={conn.kind === 'ok'}
+        includeAllPages={includeAllPages}
+        onIncludeAllPagesChange={setIncludeAllPages}
         onAnalyze={onAnalyze}
         onCancel={onCancel}
         onRefresh={onRefresh}
@@ -343,6 +359,8 @@ function ThreadCard({
   detection,
   analysis,
   connReady,
+  includeAllPages,
+  onIncludeAllPagesChange,
   onAnalyze,
   onCancel,
   onRefresh,
@@ -350,12 +368,24 @@ function ThreadCard({
   detection: Detection
   analysis: Analysis
   connReady: boolean
+  includeAllPages: boolean
+  onIncludeAllPagesChange: (b: boolean) => void
   onAnalyze: () => void
   onCancel: () => void
   onRefresh: () => void
 }) {
   const running =
-    analysis.kind === 'thread-running' || analysis.kind === 'page-running'
+    analysis.kind === 'thread-running' ||
+    analysis.kind === 'page-running' ||
+    analysis.kind === 'fetching'
+
+  const isMultiPage =
+    detection.kind === 'ready' && detection.pagination.totalPages > 1
+
+  const estimatedTotal =
+    detection.kind === 'ready'
+      ? detection.posts.length * detection.pagination.totalPages
+      : 0
 
   return (
     <section className="card">
@@ -384,14 +414,20 @@ function ThreadCard({
             {detection.posts.length > 0
               ? <>{detection.posts.length} posts on this page</>
               : <>no posts detected — will fall back to summarizing page text</>}
-            {detection.pagination.totalPages > 1 && (
+            {isMultiPage && (
               <> · page {detection.pagination.currentPage} of {detection.pagination.totalPages}</>
             )}
           </p>
-          {detection.pagination.totalPages > 1 && (
-            <p className="hint">
-              Multi-page thread detected. Each page summarizes independently for now; cross-page merging is coming.
-            </p>
+          {isMultiPage && (
+            <label className="row">
+              <input
+                type="checkbox"
+                checked={includeAllPages}
+                onChange={(e) => onIncludeAllPagesChange(e.target.checked)}
+                disabled={running}
+              />
+              <span>Include all {detection.pagination.totalPages} pages</span>
+            </label>
           )}
         </>
       )}
@@ -402,12 +438,16 @@ function ThreadCard({
           onClick={onAnalyze}
           disabled={!connReady || detection.kind !== 'ready' || running}
         >
-          {analysis.kind === 'thread-running'
+          {analysis.kind === 'fetching'
+            ? analysis.message
+            : analysis.kind === 'thread-running'
             ? `Summarizing… (chunk ${currentChunk(analysis.progress)} / ${totalChunks(analysis.progress)})`
             : analysis.kind === 'page-running'
             ? 'Summarizing page…'
             : detection.kind === 'ready' && detection.posts.length > 0
-            ? `Analyze thread (${detection.posts.length} posts)`
+            ? includeAllPages && isMultiPage
+              ? `Analyze full thread (~${estimatedTotal} posts)`
+              : `Analyze thread (${detection.posts.length} posts)`
             : 'Summarize page'}
         </button>
         {running && (
@@ -616,6 +656,64 @@ async function probeActiveTab(
   } catch {
     setDetection({ kind: 'no-content-script' })
   }
+}
+
+type DetectionReady = Extract<Detection, { kind: 'ready' }>
+
+const POLITENESS_DELAY_MS = 200
+
+/**
+ * Walk all pages of the current thread via the page's content script (uses
+ * the user's session cookies), merge posts in page order, dedupe by
+ * (author + content snippet), renumber positions globally.
+ */
+async function fetchAllPagesPosts(
+  detection: DetectionReady,
+  onProgress: (msg: string) => void,
+  signal: AbortSignal,
+): Promise<Post[]> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  if (!tab?.id) throw new Error('No active tab')
+
+  const urls = derivePageUrls(detection.pagination)
+  const currentIdx = detection.pagination.currentPage - 1
+  const fetched: (Post[] | null)[] = new Array(urls.length).fill(null)
+  fetched[currentIdx] = detection.posts
+
+  for (let i = 0; i < urls.length; i++) {
+    if (i === currentIdx) continue
+    if (signal.aborted) throw new Error('Aborted')
+
+    onProgress(`Fetching page ${i + 1} of ${urls.length}…`)
+    const req: ContentRequest = { type: 'FETCH_PAGE_POSTS', url: urls[i] }
+    const res = (await chrome.tabs.sendMessage(tab.id, req)) as ContentResponse
+    if (!res || res.type !== 'FETCHED_POSTS') {
+      throw new Error(`Unexpected response from content script for page ${i + 1}`)
+    }
+    if (res.error) throw new Error(`Page ${i + 1}: ${res.error}`)
+    fetched[i] = res.posts
+    await new Promise((r) => setTimeout(r, POLITENESS_DELAY_MS))
+  }
+
+  const merged: Post[] = []
+  for (const pagePosts of fetched) {
+    if (pagePosts) merged.push(...pagePosts)
+  }
+
+  const seen = new Set<string>()
+  const out: Post[] = []
+  for (const p of merged) {
+    const key = `${p.author}::${p.content.slice(0, 80)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const position = out.length + 1
+    out.push({
+      ...p,
+      position,
+      id: `post_${position}_${p.author.slice(0, 30)}_${p.content.slice(0, 50)}`,
+    })
+  }
+  return out
 }
 
 async function runPageSummary(

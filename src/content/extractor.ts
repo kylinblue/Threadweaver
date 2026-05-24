@@ -30,6 +30,31 @@ chrome.runtime.onMessage.addListener(
       })
       return true
     }
+    if (req.type === 'FETCH_PAGE_POSTS') {
+      // Fetch another page of the same thread using the page's cookies, then
+      // run our extractor against the response HTML. Async — return true to
+      // keep the message channel open until sendResponse fires.
+      const url = req.url
+      void fetchPagePosts(url)
+        .then((posts) => sendResponse({ type: 'FETCHED_POSTS', url, posts }))
+        .catch((err) => {
+          sendResponse({
+            type: 'FETCHED_POSTS',
+            url,
+            posts: [],
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      return true
+    }
     return undefined
   },
 )
+
+async function fetchPagePosts(url: string) {
+  const res = await fetch(url, { credentials: 'include' })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const html = await res.text()
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  return extractPosts(platform, doc)
+}

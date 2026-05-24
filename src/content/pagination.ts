@@ -1,16 +1,5 @@
+import type { Pagination } from '../lib/pagination'
 import type { ForumPlatform } from '../lib/types'
-
-export interface Pagination {
-  currentPage: number
-  totalPages: number
-  /**
-   * URL of the thread with the page indicator stripped. Used as the IndexedDB
-   * key so that visiting different pages of the same thread accumulates into
-   * one record. For platforms without pagination (Discourse, generic) this is
-   * just the current URL.
-   */
-  canonicalUrl: string
-}
 
 export function extractPagination(
   platform: ForumPlatform,
@@ -28,7 +17,12 @@ export function extractPagination(
     case 'generic':
     case 'unknown':
     default:
-      return { currentPage: 1, totalPages: 1, canonicalUrl: url.toString() }
+      return {
+        currentPage: 1,
+        totalPages: 1,
+        canonicalUrl: url.toString(),
+        scheme: { kind: 'none' },
+      }
   }
 }
 
@@ -50,6 +44,7 @@ function phpbb(doc: Document, url: URL): Pagination {
     currentPage: Math.floor(currentStart / postsPerPage) + 1,
     totalPages: Math.floor(maxStart / postsPerPage) + 1,
     canonicalUrl: canonical.toString(),
+    scheme: { kind: 'phpbb-start', postsPerPage },
   }
 }
 
@@ -88,7 +83,12 @@ function xenforo(doc: Document, url: URL): Pagination {
       if (m) maxPage = Math.max(maxPage, parseInt(m[1], 10))
     })
 
-  return { currentPage, totalPages: maxPage, canonicalUrl: canonical.toString() }
+  return {
+    currentPage,
+    totalPages: maxPage,
+    canonicalUrl: canonical.toString(),
+    scheme: { kind: 'xenforo-path' },
+  }
 }
 
 // ---------- vBulletin (4.x) ----------
@@ -112,7 +112,12 @@ function vbulletin(doc: Document, url: URL): Pagination {
       } catch { /* ignore */ }
     })
 
-  return { currentPage, totalPages: maxPage, canonicalUrl: canonical.toString() }
+  return {
+    currentPage,
+    totalPages: maxPage,
+    canonicalUrl: canonical.toString(),
+    scheme: { kind: 'vbulletin-page' },
+  }
 }
 
 // ---------- Invision Community ----------
@@ -139,7 +144,12 @@ function invision(doc: Document, url: URL): Pagination {
       } catch { /* ignore */ }
     })
 
-  return { currentPage, totalPages: maxPage, canonicalUrl: canonical.toString() }
+  return {
+    currentPage,
+    totalPages: maxPage,
+    canonicalUrl: canonical.toString(),
+    scheme: { kind: 'invision-path' },
+  }
 }
 
 function intParam(url: URL, name: string, fallback: number): number {

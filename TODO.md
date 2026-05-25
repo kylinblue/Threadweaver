@@ -2,6 +2,18 @@
 
 Out-of-scope items captured during development. Not blockers for the current phase.
 
+## Context length: adaptive chunking + settings override
+
+Phase: post-Layer-1.5. Today [src/lib/providers/ollama.ts](src/lib/providers/ollama.ts) reads each model's architectural max context via `/api/show` and clamps to a `MAX_CTX_REQUEST=32768` ceiling. That handles "shrunk by default" cases but doesn't help when our actual prompt would exceed the resolved context.
+
+Followups:
+
+- **Layer 3 — Estimate before send.** In `summarizeThread`, compute estimated prompt tokens for each chunk (`countTokens()` already provides chars/4 fallback) and compare against the model's resolved num_ctx. If estimate > 80% of context, dynamically shrink chunk size for that pass, or surface a warning. Same for meta-summarize when concatenated summaries grow.
+- **Layer 4 — Settings override.** Expose num_ctx ceiling in settings UI for advanced users who want to push past 32K on big-context models (at VRAM cost). Default stays 32K. Probably belongs near the model dropdown.
+- **Better token counting.** Current chars/4 is wildly off for code, lists, non-English text. Ollama could expose a count_tokens endpoint (some providers do); investigate. Falling back to `prompt_eval_count` from previous generate responses gives a calibration signal we could persist per model.
+
+Related: [src/lib/providers/ollama.ts](src/lib/providers/ollama.ts), [src/lib/summarizer.ts](src/lib/summarizer.ts).
+
 ## Vision models: send post images alongside text
 
 When the selected Ollama model supports image input (e.g. `gemma4`, `llava`, `llama3.2-vision`, `qwen2.5-vl`), include images from posts in the prompt rather than dropping them. (Gemma 4 confirmed solid as a vision model during 2026-05 testing.) Many forum posts carry meaningful information in images — technical diagrams, screenshots, photos — that's currently invisible to the summarizer.

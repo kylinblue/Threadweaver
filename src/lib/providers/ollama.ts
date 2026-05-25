@@ -13,6 +13,23 @@ interface OllamaTagsResponse {
   models?: Array<{ name: string }>
 }
 
+interface OllamaPSResponse {
+  models?: Array<{
+    name?: string
+    model?: string
+    size?: number
+    size_vram?: number
+  }>
+}
+
+export interface LoadedModel {
+  name: string
+  /** Total model size in bytes (sum of RAM + VRAM). */
+  sizeBytes: number
+  /** Bytes resident in VRAM. 0 means CPU-only. */
+  sizeVramBytes: number
+}
+
 interface OllamaChatResponse {
   message?: { content?: string }
   prompt_eval_count?: number
@@ -20,12 +37,24 @@ interface OllamaChatResponse {
   done?: boolean
 }
 
+/**
+ * Cap context window we'll request. Avoids VRAM blow-up on 128K-context models
+ * while still being plenty for chunked forum summaries. Raise via settings
+ * later if needed.
+ */
+const MAX_CTX_REQUEST = 32768
+const FALLBACK_CTX = 4096
+
 export class OllamaProvider implements LLMProvider {
   readonly id = 'ollama' as const
   readonly label = 'Ollama (local)'
   readonly defaultModel = OLLAMA_DEFAULT_MODEL
 
   private baseUrl: string
+  // Per-base-URL cache lives on the instance; in practice we new up a provider
+  // per request so this is short-lived, but the cost of /api/show per model
+  // call is low.
+  private ctxCache = new Map<string, number>()
 
   constructor(baseUrl: string = OLLAMA_DEFAULT_BASE_URL) {
     this.baseUrl = baseUrl
@@ -33,6 +62,53 @@ export class OllamaProvider implements LLMProvider {
 
   private url(path: string): string {
     return `${this.baseUrl.replace(/\/$/, '')}${path}`
+  }
+
+  /**
+   * Read the model's architectural max context from /api/show. Returns 4096
+   * if discovery fails (covers ancient Ollama / weird model shapes). Cached.
+   */
+  private async getModelMaxContext(model: string): Promise<number> {
+    const cached = this.ctxCache.get(model)
+    if (cached !== undefined) return cached
+
+    let ctx = FALLBACK_CTX
+    try {
+      const res = await fetch(this.url('/api/show'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      })
+      if (res.ok) {
+        const data = (await res.json()) as {
+          model_info?: Record<string, unknown>
+          parameters?: string
+        }
+        const info = data.model_info
+        if (info) {
+          for (const k of Object.keys(info)) {
+            if (k.endsWith('.context_length')) {
+              const v = info[k]
+              if (typeof v === 'number' && v > 0) { ctx = v; break }
+            }
+          }
+        }
+        // Fall back to PARAMETER num_ctx in the Modelfile if model_info missed.
+        if (ctx === FALLBACK_CTX && typeof data.parameters === 'string') {
+          const m = data.parameters.match(/^\s*num_ctx\s+(\d+)/m)
+          if (m) ctx = parseInt(m[1], 10)
+        }
+      }
+    } catch {
+      // network or parse failure — keep FALLBACK_CTX
+    }
+    this.ctxCache.set(model, ctx)
+    return ctx
+  }
+
+  /** Resolved num_ctx for the request: model's max, clamped to MAX_CTX_REQUEST. */
+  private async resolveCtx(model: string): Promise<number> {
+    return Math.min(await this.getModelMaxContext(model), MAX_CTX_REQUEST)
   }
 
   async listModels(): Promise<string[]> {
@@ -60,8 +136,10 @@ export class OllamaProvider implements LLMProvider {
     messages: ChatMessage[],
     opts: GenerateOptions = {},
   ): Promise<GenerateResult> {
+    const model = opts.model ?? this.defaultModel
+    const num_ctx = await this.resolveCtx(model)
     const body = {
-      model: opts.model ?? this.defaultModel,
+      model,
       messages,
       stream: false,
       // Ollama 0.5+: native suppression of reasoning channel on thinking models
@@ -69,6 +147,7 @@ export class OllamaProvider implements LLMProvider {
       // field, so we still post-process for inline <think>...</think> tags.
       think: false,
       options: {
+        num_ctx,
         ...(opts.temperature !== undefined && { temperature: opts.temperature }),
         ...(opts.maxTokens !== undefined && { num_predict: opts.maxTokens }),
       },
@@ -112,12 +191,15 @@ export class OllamaProvider implements LLMProvider {
     messages: ChatMessage[],
     opts: GenerateOptions = {},
   ): AsyncIterable<string> {
+    const model = opts.model ?? this.defaultModel
+    const num_ctx = await this.resolveCtx(model)
     const body = {
-      model: opts.model ?? this.defaultModel,
+      model,
       messages,
       stream: true,
       think: false,
       options: {
+        num_ctx,
         ...(opts.temperature !== undefined && { temperature: opts.temperature }),
         ...(opts.maxTokens !== undefined && { num_predict: opts.maxTokens }),
       },
@@ -171,6 +253,55 @@ export class OllamaProvider implements LLMProvider {
 
   async countTokens(text: string): Promise<number> {
     return Math.ceil(text.length / 4)
+  }
+
+  /**
+   * List models currently resident in memory (RAM or VRAM). Distinct from
+   * listModels(), which enumerates everything `ollama pull`'d.
+   */
+  async listLoadedModels(): Promise<LoadedModel[]> {
+    let res: Response
+    try {
+      res = await fetch(this.url('/api/ps'))
+    } catch (err) {
+      throw new ProviderError(
+        `Cannot reach Ollama at ${this.baseUrl}`,
+        this.id,
+        err,
+      )
+    }
+    if (!res.ok) {
+      throw new ProviderError(
+        `Ollama /api/ps returned ${res.status}`,
+        this.id,
+      )
+    }
+    const data = (await res.json()) as OllamaPSResponse
+    return (data.models ?? []).map((m) => ({
+      name: m.name ?? m.model ?? '(unknown)',
+      sizeBytes: m.size ?? 0,
+      sizeVramBytes: m.size_vram ?? 0,
+    }))
+  }
+
+  /**
+   * Request Ollama to evict a model from memory immediately. Implemented by
+   * POSTing a no-op generate with keep_alive:0; the daemon unloads and returns.
+   * Best-effort — errors are surfaced but unlikely to be actionable.
+   */
+  async unloadModel(name: string): Promise<void> {
+    const res = await fetch(this.url('/api/generate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: name, keep_alive: 0 }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      throw new ProviderError(
+        `Ollama unload of ${name} returned ${res.status}: ${detail}`,
+        this.id,
+      )
+    }
   }
 
   /**

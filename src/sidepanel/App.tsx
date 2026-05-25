@@ -8,7 +8,7 @@ import type {
 } from '../lib/messages'
 import { derivePageUrls } from '../lib/pagination'
 import { buildAnswerQueryMessages } from '../lib/prompts'
-import { OllamaProvider } from '../lib/providers/ollama'
+import { OllamaProvider, type LoadedModel } from '../lib/providers/ollama'
 import type { ChatMessage } from '../lib/providers/types'
 import {
   getSettings,
@@ -65,6 +65,8 @@ export function App() {
   const [analysis, setAnalysis] = useState<Analysis>({ kind: 'idle' })
   const [cachedSummary, setCachedSummary] = useState<string>('')
   const [indexedPostCount, setIndexedPostCount] = useState<number>(0)
+  const [loadedModels, setLoadedModels] = useState<LoadedModel[]>([])
+  const [unloading, setUnloading] = useState<boolean>(false)
   const [query, setQuery] = useState<Query>({ kind: 'idle' })
   const [includeAllPages, setIncludeAllPages] = useState<boolean>(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -178,6 +180,44 @@ export function App() {
     void probeActiveTab(setDetection, setAnalysis)
   }, [])
 
+  const refreshLoadedModels = useCallback(async () => {
+    if (!settings || conn.kind !== 'ok') {
+      setLoadedModels([])
+      return
+    }
+    try {
+      const provider = new OllamaProvider(settings.ollama.baseUrl)
+      const loaded = await provider.listLoadedModels()
+      setLoadedModels(loaded)
+    } catch {
+      setLoadedModels([])
+    }
+  }, [settings, conn.kind])
+
+  // Refresh loaded models on natural events: connection becomes ok, analysis
+  // finishes (a model just got loaded), settings change.
+  useEffect(() => {
+    void refreshLoadedModels()
+  }, [conn.kind, analysis.kind === 'done', settings?.ollama.baseUrl])
+
+  const onUnloadAll = useCallback(async () => {
+    if (!settings || loadedModels.length === 0) return
+    setUnloading(true)
+    // Optimistic clear — Ollama's /api/ps lags ~100-300ms behind the unload
+    // call, so the re-fetch would otherwise read back the still-listed model.
+    setLoadedModels([])
+    try {
+      const provider = new OllamaProvider(settings.ollama.baseUrl)
+      for (const m of loadedModels) {
+        await provider.unloadModel(m.name).catch(() => { /* best-effort */ })
+      }
+      await new Promise((r) => setTimeout(r, 250))
+      await refreshLoadedModels()
+    } finally {
+      setUnloading(false)
+    }
+  }, [settings, loadedModels, refreshLoadedModels])
+
   // Load the cached summary whenever the active thread changes or a new
   // analysis completes (writes a new 'final' record to IndexedDB).
   // Keyed by canonical thread URL so different pages of the same thread share.
@@ -254,8 +294,15 @@ export function App() {
       <SettingsCard
         settings={settings}
         conn={conn}
+        loadedModels={loadedModels}
+        unloading={unloading}
         onChange={updateOllama}
-        onTest={() => void testConnection(settings, setConn)}
+        onTest={() => {
+          void testConnection(settings, setConn)
+          void refreshLoadedModels()
+        }}
+        onRefreshLoaded={() => void refreshLoadedModels()}
+        onUnloadAll={onUnloadAll}
       />
 
       <ThreadCard
@@ -292,13 +339,21 @@ export function App() {
 function SettingsCard({
   settings,
   conn,
+  loadedModels,
+  unloading,
   onChange,
   onTest,
+  onRefreshLoaded,
+  onUnloadAll,
 }: {
   settings: Settings
   conn: ConnState
+  loadedModels: LoadedModel[]
+  unloading: boolean
   onChange: (patch: Partial<Settings['ollama']>) => Promise<void>
   onTest: () => void
+  onRefreshLoaded: () => void
+  onUnloadAll: () => void
 }) {
   return (
     <section className="card">
@@ -356,8 +411,47 @@ function SettingsCard({
         </p>
       )}
       {conn.kind === 'unreachable' && <p className="hint error">{conn.msg}</p>}
+      {conn.kind === 'ok' && (
+        <div className="loaded-models">
+          <div className="row between">
+            <span className="loaded-label">Loaded models</span>
+            <button
+              className="link"
+              onClick={onRefreshLoaded}
+              disabled={unloading}
+              title="Refresh loaded models"
+            >↻ Refresh</button>
+          </div>
+          {loadedModels.length === 0 ? (
+            <span className="hint">None loaded.</span>
+          ) : (
+            <>
+              <ul className="loaded-list">
+                {loadedModels.map((m) => (
+                  <li key={m.name}>
+                    <code>{m.name}</code> — {formatBytes(m.sizeBytes)}
+                    {m.sizeVramBytes > 0 && <span className="badge"> GPU </span>}
+                  </li>
+                ))}
+              </ul>
+              <button onClick={onUnloadAll} disabled={unloading}>
+                {unloading ? 'Unloading…' : `Unload all (${loadedModels.length})`}
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </section>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = bytes / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
 }
 
 function ThreadCard({

@@ -138,6 +138,42 @@ button.link:hover:not(:disabled) {
   margin: 0;
 }
 
+.loaded-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: GrayText;
+  border-top: 1px dashed color-mix(in srgb, CanvasText 15%, transparent);
+  padding-top: 8px;
+}
+
+.loaded-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: GrayText;
+}
+
+.loaded-list {
+  margin: 0;
+  padding-left: 16px;
+  line-height: 1.6;
+}
+
+.loaded-list li code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  background: transparent;
+  padding: 0;
+  color: CanvasText;
+}
+
+.loaded-models button {
+  align-self: flex-start;
+}
+
 .badge {
   font-size: 11px;
   padding: 2px 7px;

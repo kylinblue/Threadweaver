@@ -3,6 +3,10 @@ export type ProviderId = 'ollama' | 'openai' | 'anthropic' | 'gemini' | 'grok'
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
+  /** Base64-encoded image data (no data: prefix) to send with this message
+   *  on vision-capable providers. Providers without vision support must
+   *  ignore this field. */
+  images?: string[]
 }
 
 export interface GenerateOptions {
@@ -37,6 +41,13 @@ export interface LLMProvider {
   ): AsyncIterable<string>
 
   countTokens(text: string, model?: string): Promise<number>
+
+  /**
+   * Optional. True when the (model, provider) pair accepts images on
+   * ChatMessage.images. Callers should treat absence as "no" and skip image
+   * payloads entirely.
+   */
+  isVisionCapable?(model?: string): Promise<boolean>
 }
 
 export class ProviderError extends Error {

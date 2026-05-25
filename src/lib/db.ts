@@ -108,6 +108,28 @@ export async function getSummariesByThread(
   return db.getAllFromIndex('summaries', 'by-thread', threadUrl)
 }
 
+/**
+ * Wipe everything cached for a given canonical thread URL: the thread record,
+ * all its posts, and all its summaries. Used when stale extraction (e.g. from
+ * before a selector fix) is poisoning query mode.
+ */
+export async function clearThread(threadUrl: string): Promise<void> {
+  const db = await getDB()
+  const tx = db.transaction(['threads', 'posts', 'summaries'], 'readwrite')
+
+  await tx.objectStore('threads').delete(threadUrl)
+
+  const postsStore = tx.objectStore('posts')
+  const postKeys = await postsStore.index('by-thread').getAllKeys(threadUrl)
+  for (const k of postKeys) await postsStore.delete(k)
+
+  const summariesStore = tx.objectStore('summaries')
+  const summaryKeys = await summariesStore.index('by-thread').getAllKeys(threadUrl)
+  for (const k of summaryKeys) await summariesStore.delete(k)
+
+  await tx.done
+}
+
 export async function getLatestSummary(
   threadUrl: string,
 ): Promise<SummaryRecord | undefined> {

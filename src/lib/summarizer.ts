@@ -1,19 +1,29 @@
-import { addSummary, putPosts, upsertThread } from './db'
+import { addSummary, getPostsByThread, putPosts, upsertThread } from './db'
 import {
   buildMetaSummarizeMessages,
   buildSummarizePostsMessages,
 } from './prompts'
 import type { LLMProvider } from './providers/types'
 import type { ForumPlatform, Post } from './types'
+import {
+  attachImagesToLastMessage,
+  collectImages,
+  collectImagesRoundRobin,
+} from './vision'
 
 export const DEFAULT_CHUNK_SIZE = 10
 export const DEFAULT_META_THRESHOLD = 8
+export const MAX_IMAGES_PER_CHUNK = 10
+export const MAX_IMAGES_PER_META = 10
 
 export interface SummarizeOptions {
   chunkSize?: number
   metaThreshold?: number
   model?: string
   abortSignal?: AbortSignal
+  /** When set and the active model is vision-capable, called per image URL
+   *  to retrieve base64-encoded bytes. Returns null/throws to skip an image. */
+  fetchImage?: (url: string) => Promise<string | null>
 }
 
 export type ProgressEvent =
@@ -23,6 +33,7 @@ export type ProgressEvent =
       chunkIndex: number
       totalChunks: number
       posts: number
+      images?: number
     }
   | {
       kind: 'chunk-done'
@@ -61,6 +72,10 @@ export async function* summarizeThread(
   })
   await putPosts(thread.url, posts)
 
+  // One capability check per run — provider caches subsequent calls.
+  const visionCapable =
+    !!opts.fetchImage && !!(await provider.isVisionCapable?.(model))
+
   const chunks = chunkPosts(posts, chunkSize)
   yield { kind: 'started', totalPosts: posts.length, totalChunks: chunks.length }
 
@@ -70,19 +85,28 @@ export async function* summarizeThread(
     if (opts.abortSignal?.aborted) throw new Error('Aborted')
 
     const chunk = chunks[i]
+
+    // Fetch images for this chunk (in post order, capped) when vision is on.
+    const imageBase64s = visionCapable && opts.fetchImage
+      ? await collectImages(chunk, opts.fetchImage, MAX_IMAGES_PER_CHUNK, opts.abortSignal)
+      : []
+
     yield {
       kind: 'chunk-started',
       chunkIndex: i,
       totalChunks: chunks.length,
       posts: chunk.length,
+      ...(imageBase64s.length > 0 && { images: imageBase64s.length }),
     }
 
-    const messages = buildSummarizePostsMessages(
+    const baseMessages = buildSummarizePostsMessages(
       chunk,
       '',
       { index: i, total: chunks.length },
       thread.title,
     )
+    const messages = attachImagesToLastMessage(baseMessages, imageBase64s)
+
     const res = await provider.generate(messages, {
       model,
       abortSignal: opts.abortSignal,
@@ -113,10 +137,22 @@ export async function* summarizeThread(
 
     if (chunkSummaries.length >= metaThreshold) {
       yield { kind: 'meta-started', summaryCount: chunkSummaries.length }
-      const meta = await provider.generate(
+      const metaImages = visionCapable && opts.fetchImage
+        ? await collectImagesRoundRobin(
+            await getPostsByThread(thread.url),
+            opts.fetchImage,
+            MAX_IMAGES_PER_META,
+            opts.abortSignal,
+          )
+        : []
+      const metaMessages = attachImagesToLastMessage(
         buildMetaSummarizeMessages(chunkSummaries, thread.title),
-        { model, abortSignal: opts.abortSignal },
+        metaImages,
       )
+      const meta = await provider.generate(metaMessages, {
+        model,
+        abortSignal: opts.abortSignal,
+      })
       await addSummary({
         threadUrl: thread.url,
         kind: 'meta',
@@ -142,10 +178,22 @@ export async function* summarizeThread(
   }
 
   yield { kind: 'final-started' }
-  const finalRes = await provider.generate(
+  const finalImages = visionCapable && opts.fetchImage
+    ? await collectImagesRoundRobin(
+        await getPostsByThread(thread.url),
+        opts.fetchImage,
+        MAX_IMAGES_PER_META,
+        opts.abortSignal,
+      )
+    : []
+  const finalMessages = attachImagesToLastMessage(
     buildMetaSummarizeMessages(chunkSummaries, thread.title),
-    { model, abortSignal: opts.abortSignal },
+    finalImages,
   )
+  const finalRes = await provider.generate(finalMessages, {
+    model,
+    abortSignal: opts.abortSignal,
+  })
   await addSummary({
     threadUrl: thread.url,
     kind: 'final',

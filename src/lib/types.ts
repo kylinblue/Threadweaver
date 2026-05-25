@@ -15,6 +15,9 @@ export interface Post {
   author: string
   timestamp: string
   content: string
+  /** Absolute image URLs found inside the post content. Fetched + sent to
+   *  the model only when the active model is vision-capable. */
+  images?: string[]
 }
 
 export interface ThreadInfo {

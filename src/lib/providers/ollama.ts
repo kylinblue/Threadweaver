@@ -45,16 +45,21 @@ interface OllamaChatResponse {
 const MAX_CTX_REQUEST = 32768
 const FALLBACK_CTX = 4096
 
+interface ShowInfo {
+  maxContext: number
+  visionCapable: boolean
+}
+
 export class OllamaProvider implements LLMProvider {
   readonly id = 'ollama' as const
   readonly label = 'Ollama (local)'
   readonly defaultModel = OLLAMA_DEFAULT_MODEL
 
   private baseUrl: string
-  // Per-base-URL cache lives on the instance; in practice we new up a provider
-  // per request so this is short-lived, but the cost of /api/show per model
-  // call is low.
-  private ctxCache = new Map<string, number>()
+  // Per-model cache for /api/show derivatives (context + capabilities).
+  // Provider instances are short-lived in practice, but a single cache miss
+  // per model per session is fine.
+  private showCache = new Map<string, ShowInfo>()
 
   constructor(baseUrl: string = OLLAMA_DEFAULT_BASE_URL) {
     this.baseUrl = baseUrl
@@ -65,14 +70,16 @@ export class OllamaProvider implements LLMProvider {
   }
 
   /**
-   * Read the model's architectural max context from /api/show. Returns 4096
-   * if discovery fails (covers ancient Ollama / weird model shapes). Cached.
+   * Read the model's architectural max context + capabilities from /api/show.
+   * Returns a fallback if discovery fails. Cached per model.
    */
-  private async getModelMaxContext(model: string): Promise<number> {
-    const cached = this.ctxCache.get(model)
-    if (cached !== undefined) return cached
+  private async getShowInfo(model: string): Promise<ShowInfo> {
+    const cached = this.showCache.get(model)
+    if (cached) return cached
 
-    let ctx = FALLBACK_CTX
+    let maxContext = FALLBACK_CTX
+    let visionCapable = false
+
     try {
       const res = await fetch(this.url('/api/show'), {
         method: 'POST',
@@ -83,32 +90,48 @@ export class OllamaProvider implements LLMProvider {
         const data = (await res.json()) as {
           model_info?: Record<string, unknown>
           parameters?: string
+          capabilities?: string[]
         }
         const info = data.model_info
         if (info) {
           for (const k of Object.keys(info)) {
             if (k.endsWith('.context_length')) {
               const v = info[k]
-              if (typeof v === 'number' && v > 0) { ctx = v; break }
+              if (typeof v === 'number' && v > 0) { maxContext = v; break }
             }
           }
         }
-        // Fall back to PARAMETER num_ctx in the Modelfile if model_info missed.
-        if (ctx === FALLBACK_CTX && typeof data.parameters === 'string') {
+        if (maxContext === FALLBACK_CTX && typeof data.parameters === 'string') {
           const m = data.parameters.match(/^\s*num_ctx\s+(\d+)/m)
-          if (m) ctx = parseInt(m[1], 10)
+          if (m) maxContext = parseInt(m[1], 10)
+        }
+
+        if (Array.isArray(data.capabilities)) {
+          visionCapable = data.capabilities.some(
+            (c) => c === 'vision' || c === 'image' || c === 'multimodal',
+          )
         }
       }
     } catch {
-      // network or parse failure — keep FALLBACK_CTX
+      // keep fallbacks
     }
-    this.ctxCache.set(model, ctx)
-    return ctx
+
+    const info: ShowInfo = { maxContext, visionCapable }
+    this.showCache.set(model, info)
+    return info
   }
 
   /** Resolved num_ctx for the request: model's max, clamped to MAX_CTX_REQUEST. */
   private async resolveCtx(model: string): Promise<number> {
-    return Math.min(await this.getModelMaxContext(model), MAX_CTX_REQUEST)
+    const { maxContext } = await this.getShowInfo(model)
+    return Math.min(maxContext, MAX_CTX_REQUEST)
+  }
+
+  /** True if the model accepts image inputs (gemma3+/4, llava, llama3.2-vision, qwen2.5-vl, etc.) */
+  async isVisionCapable(model?: string): Promise<boolean> {
+    const m = model ?? this.defaultModel
+    const { visionCapable } = await this.getShowInfo(m)
+    return visionCapable
   }
 
   async listModels(): Promise<string[]> {
@@ -140,7 +163,7 @@ export class OllamaProvider implements LLMProvider {
     const num_ctx = await this.resolveCtx(model)
     const body = {
       model,
-      messages,
+      messages: serializeMessages(messages),
       stream: false,
       // Ollama 0.5+: native suppression of reasoning channel on thinking models
       // (deepseek-r1, qwen3, gpt-oss, qwq). Older Ollama silently ignores the
@@ -195,7 +218,7 @@ export class OllamaProvider implements LLMProvider {
     const num_ctx = await this.resolveCtx(model)
     const body = {
       model,
-      messages,
+      messages: serializeMessages(messages),
       stream: true,
       think: false,
       options: {
@@ -357,6 +380,21 @@ export type VerifyResult =
   | { kind: 'empty' }
   | { kind: 'origin-blocked'; models: string[] }
   | { kind: 'unreachable'; msg: string }
+
+/**
+ * Map our ChatMessage[] to Ollama's wire format. Only difference is that we
+ * forward optional `images` (base64, no data: prefix) on messages that have
+ * them, which Ollama accepts on vision-capable models.
+ */
+function serializeMessages(
+  messages: ChatMessage[],
+): Array<{ role: string; content: string; images?: string[] }> {
+  return messages.map((m) => ({
+    role: m.role,
+    content: m.content,
+    ...(m.images && m.images.length > 0 && { images: m.images }),
+  }))
+}
 
 /**
  * Strip <think>...</think> and <thinking>...</thinking> reasoning blocks

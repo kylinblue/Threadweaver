@@ -8,6 +8,7 @@ export type ContentRequest =
   | { type: 'GET_PAGE_TEXT' }
   | { type: 'GET_POSTS' }
   | { type: 'FETCH_PAGE_POSTS'; url: string }
+  | { type: 'FETCH_IMAGE_BASE64'; url: string }
 
 export type ContentResponse =
   | { type: 'PAGE_TEXT'; url: string; title: string; text: string }
@@ -23,5 +24,13 @@ export type ContentResponse =
       type: 'FETCHED_POSTS'
       url: string
       posts: Post[]
+      error?: string
+    }
+  | {
+      type: 'FETCHED_IMAGE'
+      url: string
+      /** Base64-encoded image bytes (no data: prefix). Undefined on error. */
+      base64?: string
+      mimeType?: string
       error?: string
     }

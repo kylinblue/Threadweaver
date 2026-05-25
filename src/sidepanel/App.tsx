@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getLatestSummary, getPostsByThread, searchPostsByThread } from '../lib/db'
+import {
+  clearThread,
+  getLatestSummary,
+  getPostsByThread,
+  searchPostsByThread,
+} from '../lib/db'
 import { renderMarkdown } from '../lib/markdown'
 import type {
   ContentRequest,
@@ -10,6 +15,11 @@ import { derivePageUrls } from '../lib/pagination'
 import { buildAnswerQueryMessages } from '../lib/prompts'
 import { OllamaProvider, type LoadedModel } from '../lib/providers/ollama'
 import type { ChatMessage } from '../lib/providers/types'
+import {
+  attachImagesToLastMessage,
+  collectImages,
+  collectImagesRoundRobin,
+} from '../lib/vision'
 import {
   getSettings,
   setSettings,
@@ -23,6 +33,7 @@ import {
 import type { ForumPlatform, Post } from '../lib/types'
 
 const MAX_PAGE_CHARS = 16_000
+const MAX_QUERY_IMAGES = 5
 
 type ConnState =
   | { kind: 'idle' }
@@ -141,7 +152,11 @@ export function App() {
           platform: detection.platform,
         },
         postsToAnalyze,
-        { model, abortSignal: abort.signal },
+        {
+          model,
+          abortSignal: abort.signal,
+          fetchImage: fetchImageFromActiveTab,
+        },
       )
 
       const events: ProgressEvent[] = []
@@ -254,13 +269,44 @@ export function App() {
           detection.pagination.canonicalUrl,
           trimmed,
         )
-        const messages = buildAnswerQueryMessages(
+        const provider = new OllamaProvider(settings.ollama.baseUrl)
+
+        // If the model takes images, prefer images from keyword-relevant posts.
+        // But — keyword search may miss image-bearing posts entirely (a query
+        // like "describe the images" matches text content, not <img> tags).
+        // Supplement with round-robin from the rest of the indexed thread so
+        // the model always gets something to look at when we have something
+        // to show. Tighter cap than summarize paths — query mode is interactive.
+        const visionCapable = await provider.isVisionCapable(settings.ollama.model)
+        let queryImages: string[] = []
+        if (visionCapable) {
+          queryImages = await collectImages(
+            relevantPosts,
+            fetchImageFromActiveTab,
+            MAX_QUERY_IMAGES,
+            abort.signal,
+          )
+          if (queryImages.length < MAX_QUERY_IMAGES) {
+            const allPosts = await getPostsByThread(detection.pagination.canonicalUrl)
+            const relevantIds = new Set(relevantPosts.map((p) => p.id))
+            const supplementary = allPosts.filter((p) => !relevantIds.has(p.id))
+            const more = await collectImagesRoundRobin(
+              supplementary,
+              fetchImageFromActiveTab,
+              MAX_QUERY_IMAGES - queryImages.length,
+              abort.signal,
+            )
+            queryImages = [...queryImages, ...more]
+          }
+        }
+
+        const baseMessages = buildAnswerQueryMessages(
           trimmed,
           cachedSummary,
           relevantPosts,
           detection.title,
         )
-        const provider = new OllamaProvider(settings.ollama.baseUrl)
+        const messages = attachImagesToLastMessage(baseMessages, queryImages)
 
         let acc = ''
         for await (const chunk of provider.generateStream(messages, {
@@ -287,6 +333,15 @@ export function App() {
   const onCancelQuery = useCallback(() => {
     queryAbortRef.current?.abort()
   }, [])
+
+  const onDropThreadCache = useCallback(async () => {
+    if (!canonicalUrl) return
+    await clearThread(canonicalUrl)
+    setCachedSummary('')
+    setIndexedPostCount(0)
+    setQuery({ kind: 'idle' })
+    setAnalysis({ kind: 'idle' })
+  }, [canonicalUrl])
 
   if (!settings) return <main><p className="hint">Loading…</p></main>
 
@@ -321,7 +376,12 @@ export function App() {
         onRefresh={onRefresh}
       />
 
-      <SummaryCard analysis={analysis} cachedSummary={cachedSummary} />
+      <SummaryCard
+        analysis={analysis}
+        cachedSummary={cachedSummary}
+        indexedPostCount={indexedPostCount}
+        onDrop={() => void onDropThreadCache()}
+      />
 
       <QueryCard
         query={query}
@@ -579,7 +639,7 @@ function ProgressList({ events }: { events: ProgressEvent[] }) {
         case 'started':
           return `Starting: ${e.totalPosts} posts in ${e.totalChunks} chunk${e.totalChunks === 1 ? '' : 's'}`
         case 'chunk-started':
-          return `Chunk ${e.chunkIndex + 1}/${e.totalChunks}: summarizing ${e.posts} posts…`
+          return `Chunk ${e.chunkIndex + 1}/${e.totalChunks}: summarizing ${e.posts} posts${e.images ? ` + ${e.images} image${e.images === 1 ? '' : 's'}` : ''}…`
         case 'chunk-done':
           return `Chunk ${e.chunkIndex + 1}/${e.totalChunks}: done (posts ${e.postRangeStart}–${e.postRangeEnd})`
         case 'meta-started':
@@ -602,9 +662,13 @@ function ProgressList({ events }: { events: ProgressEvent[] }) {
 function SummaryCard({
   analysis,
   cachedSummary,
+  indexedPostCount,
+  onDrop,
 }: {
   analysis: Analysis
   cachedSummary: string
+  indexedPostCount: number
+  onDrop: () => void
 }) {
   const live =
     analysis.kind === 'thread-running' ? analysis.rollingSummary
@@ -615,13 +679,30 @@ function SummaryCard({
   const display = live || cachedSummary
   if (!display && analysis.kind !== 'error') return null
 
+  // Show Drop affordance whenever there's anything in the DB for this thread.
+  // Disable mid-run so users don't yank state out from under the summarizer.
+  const canDrop =
+    (cachedSummary.length > 0 || indexedPostCount > 0) &&
+    analysis.kind !== 'thread-running' &&
+    analysis.kind !== 'fetching' &&
+    analysis.kind !== 'page-running'
+
   return (
     <section className="card">
       <div className="row between">
-        <h2>Summary</h2>
-        {analysis.kind === 'thread-running' && <span className="badge">live</span>}
-        {analysis.kind === 'done' && <span className="badge ok">final</span>}
-        {!live && cachedSummary && <span className="badge">cached</span>}
+        <div className="row">
+          <h2>Summary</h2>
+          {analysis.kind === 'thread-running' && <span className="badge">live</span>}
+          {analysis.kind === 'done' && <span className="badge ok">final</span>}
+          {!live && cachedSummary && <span className="badge">cached</span>}
+        </div>
+        {canDrop && (
+          <button
+            className="link"
+            onClick={onDrop}
+            title="Delete cached posts + summary for this thread"
+          >Drop cache</button>
+        )}
       </div>
       {analysis.kind === 'error' && <p className="hint error">{analysis.msg}</p>}
       {display && <Markdown text={display} />}
@@ -837,6 +918,25 @@ async function fetchAllPagesPosts(
     })
   }
   return out
+}
+
+/**
+ * Asks the active tab's content script to fetch and base64-encode an image
+ * URL using the page's session cookies. Returns null on any failure so the
+ * summarizer can silently skip uncooperative images.
+ */
+async function fetchImageFromActiveTab(url: string): Promise<string | null> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (!tab?.id) return null
+    const req: ContentRequest = { type: 'FETCH_IMAGE_BASE64', url }
+    const res = (await chrome.tabs.sendMessage(tab.id, req)) as ContentResponse
+    if (!res || res.type !== 'FETCHED_IMAGE') return null
+    if (res.error || !res.base64) return null
+    return res.base64
+  } catch {
+    return null
+  }
 }
 
 async function runPageSummary(

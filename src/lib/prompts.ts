@@ -33,10 +33,15 @@ export interface BatchInfo {
   total: number
 }
 
+function titleLine(title?: string): string {
+  return title ? `Thread title: "${title}"\n` : ''
+}
+
 export function buildSummarizePostsMessages(
   posts: Post[],
   guidance: string = '',
   batch?: BatchInfo,
+  threadTitle?: string,
 ): ChatMessage[] {
   const postsText = posts
     .map(
@@ -54,6 +59,7 @@ export function buildSummarizePostsMessages(
       : ''
 
   const userParts = [
+    titleLine(threadTitle),
     batchLine,
     guidance ? `User guidance: ${guidance}\n` : '',
     `Posts to summarize:\n\n${postsText}`,
@@ -65,14 +71,20 @@ export function buildSummarizePostsMessages(
   ]
 }
 
-export function buildMetaSummarizeMessages(summaries: string[]): ChatMessage[] {
+export function buildMetaSummarizeMessages(
+  summaries: string[],
+  threadTitle?: string,
+): ChatMessage[] {
   const text = summaries
     .map((s, i) => `Summary ${i + 1}:\n${s}`)
     .join('\n\n---\n\n')
 
   return [
     { role: 'system', content: META_SUMMARIZE_SYSTEM },
-    { role: 'user', content: `Previous summaries:\n\n${text}\n\nUnified summary:` },
+    {
+      role: 'user',
+      content: `${titleLine(threadTitle)}Previous summaries:\n\n${text}\n\nUnified summary:`,
+    },
   ]
 }
 
@@ -84,6 +96,7 @@ export function buildAnswerQueryMessages(
   query: string,
   summary: string,
   relevantPosts: Post[],
+  threadTitle?: string,
 ): ChatMessage[] {
   const postsBlock = relevantPosts.length
     ? '\n\nRelevant posts:\n' +
@@ -95,7 +108,7 @@ export function buildAnswerQueryMessages(
         .join('\n\n')
     : ''
 
-  const userContent = `Thread summary:
+  const userContent = `${titleLine(threadTitle)}Thread summary:
 ${summary || '(no summary available yet)'}${postsBlock}
 
 User question: ${query}`

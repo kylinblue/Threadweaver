@@ -77,10 +77,12 @@ export async function* summarizeThread(
       posts: chunk.length,
     }
 
-    const messages = buildSummarizePostsMessages(chunk, '', {
-      index: i,
-      total: chunks.length,
-    })
+    const messages = buildSummarizePostsMessages(
+      chunk,
+      '',
+      { index: i, total: chunks.length },
+      thread.title,
+    )
     const res = await provider.generate(messages, {
       model,
       abortSignal: opts.abortSignal,
@@ -112,7 +114,7 @@ export async function* summarizeThread(
     if (chunkSummaries.length >= metaThreshold) {
       yield { kind: 'meta-started', summaryCount: chunkSummaries.length }
       const meta = await provider.generate(
-        buildMetaSummarizeMessages(chunkSummaries),
+        buildMetaSummarizeMessages(chunkSummaries, thread.title),
         { model, abortSignal: opts.abortSignal },
       )
       await addSummary({
@@ -141,7 +143,7 @@ export async function* summarizeThread(
 
   yield { kind: 'final-started' }
   const finalRes = await provider.generate(
-    buildMetaSummarizeMessages(chunkSummaries),
+    buildMetaSummarizeMessages(chunkSummaries, thread.title),
     { model, abortSignal: opts.abortSignal },
   )
   await addSummary({

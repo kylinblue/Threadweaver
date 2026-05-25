@@ -254,7 +254,12 @@ export function App() {
           detection.pagination.canonicalUrl,
           trimmed,
         )
-        const messages = buildAnswerQueryMessages(trimmed, cachedSummary, relevantPosts)
+        const messages = buildAnswerQueryMessages(
+          trimmed,
+          cachedSummary,
+          relevantPosts,
+          detection.title,
+        )
         const provider = new OllamaProvider(settings.ollama.baseUrl)
 
         let acc = ''

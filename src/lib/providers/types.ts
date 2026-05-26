@@ -1,4 +1,10 @@
-export type ProviderId = 'ollama' | 'openai' | 'anthropic' | 'gemini' | 'grok'
+export type ProviderId =
+  | 'ollama'
+  | 'lmstudio'
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'grok'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'

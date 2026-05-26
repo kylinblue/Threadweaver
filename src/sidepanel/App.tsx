@@ -17,8 +17,12 @@ import {
   type AnalysisScope,
 } from '../lib/pagination'
 import { buildAnswerQueryMessages } from '../lib/prompts'
+import {
+  activeProviderConfig,
+  createProvider,
+} from '../lib/providers/factory'
 import { OllamaProvider, type LoadedModel } from '../lib/providers/ollama'
-import type { ChatMessage } from '../lib/providers/types'
+import type { ChatMessage, LLMProvider } from '../lib/providers/types'
 import {
   attachImagesToLastMessage,
   collectImages,
@@ -98,18 +102,22 @@ export function App() {
     return subscribeSettings(setLocalSettings)
   }, [])
 
+  // Re-test connection whenever the active provider's base URL changes (or
+  // provider switches entirely).
   useEffect(() => {
     if (settings) void testConnection(settings, setConn)
-  }, [settings?.ollama.baseUrl])
+  }, [settings?.providerId, settings?.ollama.baseUrl, settings?.lmstudio.baseUrl])
 
   // Auto-pick: if the configured model isn't installed but others are,
   // silently switch to the first available so the user gets a working setup.
   useEffect(() => {
     if (!settings) return
     if (conn.kind !== 'ok') return
-    if (conn.models.includes(settings.ollama.model)) return
-    void updateOllama({ model: conn.models[0] })
-  }, [conn, settings?.ollama.model])
+    const currentModel = activeProviderConfig(settings).model
+    if (currentModel && conn.models.includes(currentModel)) return
+    if (conn.models.length === 0) return
+    void updateProviderConfig({ model: conn.models[0] })
+  }, [conn, settings?.providerId])
 
   useEffect(() => {
     void probeActiveTab(setDetection, setAnalysis)
@@ -118,19 +126,36 @@ export function App() {
     return () => chrome.tabs.onActivated.removeListener(onActivated)
   }, [])
 
-  const updateOllama = useCallback(
-    async (patch: Partial<Settings['ollama']>) => {
+  /**
+   * Update the active provider's (baseUrl, model). Routes the patch into
+   * settings.ollama or settings.lmstudio based on settings.providerId.
+   */
+  const updateProviderConfig = useCallback(
+    async (patch: Partial<{ baseUrl: string; model: string }>) => {
       if (!settings) return
-      const next: Settings = { ...settings, ollama: { ...settings.ollama, ...patch } }
+      const current = activeProviderConfig(settings)
+      const updated = { ...current, ...patch }
+      const next: Settings =
+        settings.providerId === 'lmstudio'
+          ? { ...settings, lmstudio: updated }
+          : { ...settings, ollama: updated }
       await setSettings(next)
+    },
+    [settings],
+  )
+
+  const setProviderId = useCallback(
+    async (providerId: Settings['providerId']) => {
+      if (!settings) return
+      await setSettings({ ...settings, providerId })
     },
     [settings],
   )
 
   const onAnalyze = useCallback(async () => {
     if (!settings || detection.kind !== 'ready') return
-    const provider = new OllamaProvider(settings.ollama.baseUrl)
-    const model = settings.ollama.model
+    const provider = createProvider(settings)
+    const model = activeProviderConfig(settings).model
 
     if (detection.posts.length === 0) {
       void runPageSummary(provider, model, setAnalysis)
@@ -164,6 +189,20 @@ export function App() {
           abort.signal,
         )
         hasMiddleGap = selection.hasMiddleGap
+      }
+
+      // Manual scope: filter to the requested [startPost, endPost] range and
+      // renumber positions to be thread-global (so the model sees "Post #25"
+      // instead of position-within-fetched-batch).
+      if (selection.manualRange) {
+        const { startPost, endPost, pageOffset } = selection.manualRange
+        postsToAnalyze = postsToAnalyze
+          .map((p, i) => ({ ...p, position: pageOffset + i + 1 }))
+          .filter((p) => p.position >= startPost && p.position <= endPost)
+          .map((p) => ({
+            ...p,
+            id: `post_${p.position}_${p.author.slice(0, 30)}_${p.content.slice(0, 50)}`,
+          }))
       }
 
       setAnalysis({ kind: 'thread-running', progress: [], rollingSummary: '' })
@@ -224,8 +263,12 @@ export function App() {
     void probeActiveTab(setDetection, setAnalysis)
   }, [])
 
+  /**
+   * Loaded-models list is Ollama-specific (LM Studio doesn't expose hot model
+   * state via its public API). Gate the whole feature to providerId='ollama'.
+   */
   const refreshLoadedModels = useCallback(async () => {
-    if (!settings || conn.kind !== 'ok') {
+    if (!settings || settings.providerId !== 'ollama' || conn.kind !== 'ok') {
       setLoadedModels([])
       return
     }
@@ -238,26 +281,39 @@ export function App() {
     }
   }, [settings, conn.kind])
 
-  // Refresh loaded models on natural events: connection becomes ok, analysis
-  // finishes (a model just got loaded), settings change.
   useEffect(() => {
     void refreshLoadedModels()
-  }, [conn.kind, analysis.kind === 'done', settings?.ollama.baseUrl])
+  }, [conn.kind, analysis.kind === 'done', settings?.providerId, settings?.ollama.baseUrl])
 
-  // Vision capability per (model, baseUrl). Drives whether the "Include
-  // images" toggle appears in ThreadCard.
+  /**
+   * Vision capability: drives whether the "Include images" toggle appears
+   * in ThreadCard. Providers without an isVisionCapable method (LM Studio)
+   * can't introspect, so we show the toggle and let the user decide.
+   */
   useEffect(() => {
     if (!settings || conn.kind !== 'ok') { setVisionModel(false); return }
-    const provider = new OllamaProvider(settings.ollama.baseUrl)
+    const provider = createProvider(settings)
+    const model = activeProviderConfig(settings).model
     let cancelled = false
-    void provider.isVisionCapable(settings.ollama.model).then((v) => {
-      if (!cancelled) setVisionModel(v)
-    })
+    if (provider.isVisionCapable) {
+      void provider.isVisionCapable(model).then((v) => {
+        if (!cancelled) setVisionModel(v)
+      })
+    } else {
+      setVisionModel(true)
+    }
     return () => { cancelled = true }
-  }, [settings?.ollama.baseUrl, settings?.ollama.model, conn.kind])
+  }, [
+    settings?.providerId,
+    settings?.ollama.baseUrl,
+    settings?.ollama.model,
+    settings?.lmstudio.baseUrl,
+    settings?.lmstudio.model,
+    conn.kind,
+  ])
 
   const onUnloadAll = useCallback(async () => {
-    if (!settings || loadedModels.length === 0) return
+    if (!settings || settings.providerId !== 'ollama' || loadedModels.length === 0) return
     setUnloading(true)
     // Optimistic clear — Ollama's /api/ps lags ~100-300ms behind the unload
     // call, so the re-fetch would otherwise read back the still-listed model.
@@ -327,7 +383,8 @@ export function App() {
           detection.pagination.canonicalUrl,
           trimmed,
         )
-        const provider = new OllamaProvider(settings.ollama.baseUrl)
+        const provider = createProvider(settings)
+        const model = activeProviderConfig(settings).model
 
         // If the model takes images, prefer images from keyword-relevant posts.
         // But — keyword search may miss image-bearing posts entirely (a query
@@ -335,7 +392,15 @@ export function App() {
         // Supplement with round-robin from the rest of the indexed thread so
         // the model always gets something to look at when we have something
         // to show. Tighter cap than summarize paths — query mode is interactive.
-        const visionCapable = await provider.isVisionCapable(settings.ollama.model)
+        //
+        // Vision gate honors the user's Include images toggle: when off, we
+        // skip fetching entirely. When on, we ask the provider whether the
+        // model supports images (absent method = unknown → trust the toggle).
+        const providerSaysVision =
+          provider.isVisionCapable
+            ? await provider.isVisionCapable(model)
+            : true
+        const visionCapable = useImages && providerSaysVision
         let queryImages: string[] = []
         if (visionCapable) {
           queryImages = await collectImages(
@@ -368,7 +433,7 @@ export function App() {
 
         let acc = ''
         for await (const chunk of provider.generateStream(messages, {
-          model: settings.ollama.model,
+          model,
           abortSignal: abort.signal,
         })) {
           acc += chunk
@@ -414,7 +479,8 @@ export function App() {
         conn={conn}
         loadedModels={loadedModels}
         unloading={unloading}
-        onChange={updateOllama}
+        onProviderChange={(id) => void setProviderId(id)}
+        onChange={updateProviderConfig}
         onTest={() => {
           void testConnection(settings, setConn)
           void refreshLoadedModels()
@@ -471,49 +537,72 @@ function SettingsCard({
   onTest,
   onRefreshLoaded,
   onUnloadAll,
+  onProviderChange,
 }: {
   settings: Settings
   conn: ConnState
   loadedModels: LoadedModel[]
   unloading: boolean
-  onChange: (patch: Partial<Settings['ollama']>) => Promise<void>
+  onProviderChange: (id: Settings['providerId']) => void
+  onChange: (patch: Partial<{ baseUrl: string; model: string }>) => Promise<void>
   onTest: () => void
   onRefreshLoaded: () => void
   onUnloadAll: () => void
 }) {
+  const current = activeProviderConfig(settings)
+  const isOllama = settings.providerId === 'ollama'
+  const isLMStudio = settings.providerId === 'lmstudio'
+
   return (
     <section className="card">
       <h2>Settings</h2>
       <label>
         Provider
-        <select value={settings.providerId} disabled>
+        <select
+          value={settings.providerId}
+          onChange={(e) => onProviderChange(e.target.value as Settings['providerId'])}
+        >
           <option value="ollama">Ollama (local)</option>
+          <option value="lmstudio">LM Studio (local)</option>
         </select>
       </label>
       <label>
         Base URL
         <input
           type="text"
-          value={settings.ollama.baseUrl}
+          value={current.baseUrl}
           onChange={(e) => void onChange({ baseUrl: e.target.value })}
           spellCheck={false}
         />
       </label>
+      {isLMStudio && (
+        <p className="hint">
+          LM Studio: <strong>Enable CORS</strong> in the Developer panel.
+          Crank <strong>Context Length</strong> when loading a model —
+          bigger context = fewer chunks = faster, sharper summaries. Most
+          modern models support 32K-128K; push it. Set{' '}
+          <strong>Parallel ≥ 2</strong> in LM Studio to let the extension run
+          chunks concurrently for a real speedup on multi-chunk threads.
+        </p>
+      )}
       <label>
         Model
         <select
-          value={settings.ollama.model}
+          value={current.model}
           onChange={(e) => void onChange({ model: e.target.value })}
           disabled={conn.kind !== 'ok'}
         >
-          {conn.kind === 'ok' && !conn.models.includes(settings.ollama.model) && (
-            <option value={settings.ollama.model}>
-              {settings.ollama.model} (not installed)
+          {conn.kind === 'ok' && current.model && !conn.models.includes(current.model) && (
+            <option value={current.model}>
+              {current.model} (not available)
             </option>
+          )}
+          {conn.kind === 'ok' && !current.model && (
+            <option value="">— pick a model —</option>
           )}
           {conn.kind === 'ok'
             ? conn.models.map((m) => <option key={m} value={m}>{m}</option>)
-            : <option value={settings.ollama.model}>{settings.ollama.model}</option>}
+            : <option value={current.model}>{current.model || '(not connected)'}</option>}
         </select>
       </label>
       <div className="row">
@@ -522,11 +611,18 @@ function SettingsCard({
         </button>
         <ConnBadge state={conn} />
       </div>
-      {conn.kind === 'empty' && (
+      {conn.kind === 'empty' && isOllama && (
         <p className="hint">
           Ollama is running but no models are installed. Pull one in a terminal:
           <code className="block">ollama pull llama3.2:3b</code>
           then click <strong>Test connection</strong> again.
+        </p>
+      )}
+      {conn.kind === 'empty' && isLMStudio && (
+        <p className="hint">
+          LM Studio server is up but reports no models. Download one in LM Studio's
+          Search/Discover tab and load it via the Server tab, then click
+          <strong> Test connection</strong>.
         </p>
       )}
       {conn.kind === 'origin-blocked' && (
@@ -536,8 +632,18 @@ function SettingsCard({
           <code className="block">[Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "chrome-extension://*", "User")</code>
         </p>
       )}
-      {conn.kind === 'unreachable' && <p className="hint error">{conn.msg}</p>}
-      {conn.kind === 'ok' && (
+      {conn.kind === 'unreachable' && (
+        <p className="hint error">
+          {conn.msg}
+          {isLMStudio && (
+            <>
+              {' '}LM Studio also needs <strong>Enable CORS</strong> toggled on in
+              the Developer panel to accept requests from the extension.
+            </>
+          )}
+        </p>
+      )}
+      {conn.kind === 'ok' && isOllama && (
         <div className="loaded-models">
           <div className="row between">
             <span className="loaded-label">Loaded models</span>
@@ -628,6 +734,7 @@ function ThreadCard({
       case 'bookend': return 'bookend'
       case 'last': return 'last'
       case 'all': return 'all'
+      case 'manual': return 'manual'
     }
   })()
 
@@ -667,29 +774,78 @@ function ThreadCard({
           </p>
 
           {isMultiPage && (
-            <label>
-              Scope
-              <select
-                value={scopeKey}
-                onChange={(e) => {
-                  const v = e.target.value
-                  if (v === 'this-page') onScopeChange({ kind: 'this-page' })
-                  else if (v === 'bookend') onScopeChange({ kind: 'bookend', postsPerSide: BOOKEND_POSTS_PER_SIDE })
-                  else if (v === 'last') onScopeChange({ kind: 'last', postCount: LAST_N_POSTS })
-                  else if (v === 'all') onScopeChange({ kind: 'all' })
-                }}
-                disabled={running}
-              >
-                <option value="this-page">This page only ({detection.posts.length} posts)</option>
-                <option value="bookend">
-                  Bookend (first {BOOKEND_POSTS_PER_SIDE} + last {BOOKEND_POSTS_PER_SIDE})
-                </option>
-                <option value="last">Last {LAST_N_POSTS} posts</option>
-                <option value="all">
-                  Full thread ({totalIsExact ? '' : '~'}{totalPosts} posts{isHuge ? ' — confirm needed' : ''})
-                </option>
-              </select>
-            </label>
+            <>
+              <label>
+                Scope
+                <select
+                  value={scopeKey}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (v === 'this-page') onScopeChange({ kind: 'this-page' })
+                    else if (v === 'bookend') onScopeChange({ kind: 'bookend', postsPerSide: BOOKEND_POSTS_PER_SIDE })
+                    else if (v === 'last') onScopeChange({ kind: 'last', postCount: LAST_N_POSTS })
+                    else if (v === 'all') onScopeChange({ kind: 'all' })
+                    else if (v === 'manual') onScopeChange({
+                      kind: 'manual',
+                      startPost: 1,
+                      endPost: Math.min(totalPosts, 50),
+                    })
+                  }}
+                  disabled={running}
+                >
+                  <option value="this-page">This page only ({detection.posts.length} posts)</option>
+                  <option value="bookend">
+                    Bookend (first {BOOKEND_POSTS_PER_SIDE} + last {BOOKEND_POSTS_PER_SIDE})
+                  </option>
+                  <option value="last">Last {LAST_N_POSTS} posts</option>
+                  <option value="manual">Manual range…</option>
+                  <option value="all">
+                    Full thread ({totalIsExact ? '' : '~'}{totalPosts} posts{isHuge ? ' — confirm needed' : ''})
+                  </option>
+                </select>
+              </label>
+
+              {scope.kind === 'manual' && (
+                <div className="manual-range">
+                  <label>
+                    From post #
+                    <input
+                      type="number"
+                      min={1}
+                      max={totalPosts}
+                      value={scope.startPost}
+                      onChange={(e) => {
+                        const v = Math.max(1, parseInt(e.target.value, 10) || 1)
+                        onScopeChange({ ...scope, startPost: v })
+                      }}
+                      disabled={running}
+                    />
+                  </label>
+                  <label>
+                    To post #
+                    <input
+                      type="number"
+                      min={scope.startPost}
+                      max={totalPosts}
+                      value={scope.endPost}
+                      onChange={(e) => {
+                        const v = Math.max(
+                          scope.startPost,
+                          parseInt(e.target.value, 10) || scope.startPost,
+                        )
+                        onScopeChange({ ...scope, endPost: v })
+                      }}
+                      disabled={running}
+                    />
+                  </label>
+                  <span className="hint">
+                    {scope.endPost - scope.startPost + 1} posts requested. Post
+                    numbering is thread-global; we'll fetch only the pages
+                    covering this range.
+                  </span>
+                </div>
+              )}
+            </>
           )}
 
           {visionModel && (
@@ -746,6 +902,7 @@ function analyzeButtonLabel(
     case 'bookend': return `Analyze bookend (${scope.postsPerSide * 2} posts)`
     case 'last': return `Analyze last ${scope.postCount} posts`
     case 'all': return `Analyze full thread (${approx}${totalPosts} posts)`
+    case 'manual': return `Analyze posts ${scope.startPost}–${scope.endPost}`
   }
 }
 
@@ -943,9 +1100,22 @@ async function testConnection(
   setConn: (s: ConnState) => void,
 ) {
   setConn({ kind: 'testing' })
-  const provider = new OllamaProvider(settings.ollama.baseUrl)
-  const result = await provider.verifyAccess()
-  setConn(result)
+  const provider = createProvider(settings)
+
+  // Ollama has a richer probe (distinguishes origin-blocked from unreachable
+  // via a follow-up POST). Generic providers just do listModels and report
+  // ok / empty / unreachable.
+  if (provider instanceof OllamaProvider) {
+    setConn(await provider.verifyAccess())
+    return
+  }
+  try {
+    const models = await provider.listModels()
+    setConn(models.length === 0 ? { kind: 'empty' } : { kind: 'ok', models })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    setConn({ kind: 'unreachable', msg })
+  }
 }
 
 async function probeActiveTab(
@@ -1069,7 +1239,7 @@ async function fetchImageFromActiveTab(url: string): Promise<string | null> {
 }
 
 async function runPageSummary(
-  provider: OllamaProvider,
+  provider: LLMProvider,
   model: string,
   setAnalysis: (a: Analysis) => void,
 ) {

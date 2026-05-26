@@ -1,4 +1,7 @@
 import {
+  LM_STUDIO_DEFAULT_BASE_URL,
+} from './providers/lmstudio'
+import {
   OLLAMA_DEFAULT_BASE_URL,
   OLLAMA_DEFAULT_MODEL,
 } from './providers/ollama'
@@ -9,9 +12,15 @@ export interface OllamaSettings {
   model: string
 }
 
+export interface LMStudioSettings {
+  baseUrl: string
+  model: string
+}
+
 export interface Settings {
   providerId: ProviderId
   ollama: OllamaSettings
+  lmstudio: LMStudioSettings
 }
 
 const STORAGE_KEY = 'tw.settings'
@@ -22,6 +31,12 @@ const DEFAULT_SETTINGS: Settings = {
     baseUrl: OLLAMA_DEFAULT_BASE_URL,
     model: OLLAMA_DEFAULT_MODEL,
   },
+  lmstudio: {
+    baseUrl: LM_STUDIO_DEFAULT_BASE_URL,
+    // No sensible default — LM Studio user picks the loaded model in-app
+    // and we discover it via /v1/models after they Test connection.
+    model: '',
+  },
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -31,6 +46,7 @@ export async function getSettings(): Promise<Settings> {
     ...DEFAULT_SETTINGS,
     ...raw,
     ollama: { ...DEFAULT_SETTINGS.ollama, ...raw?.ollama },
+    lmstudio: { ...DEFAULT_SETTINGS.lmstudio, ...raw?.lmstudio },
   }
 }
 

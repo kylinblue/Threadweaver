@@ -48,6 +48,7 @@ export type AnalysisScope =
   | { kind: 'bookend'; postsPerSide: number }
   | { kind: 'last'; postCount: number }
   | { kind: 'all' }
+  | { kind: 'manual'; startPost: number; endPost: number }
 
 export interface ScopeSelection {
   /** 1-based page numbers we'll fetch (excluding the current page, which we
@@ -56,6 +57,9 @@ export interface ScopeSelection {
   /** Indicates the result skips the middle of the thread, so the summarizer
    *  can tell the model about the gap. */
   hasMiddleGap: boolean
+  /** For 'manual' scope, the requested post-number range (1-based, thread-
+   *  global). Caller uses this to filter+renumber the merged fetch result. */
+  manualRange?: { startPost: number; endPost: number; pageOffset: number }
 }
 
 /**
@@ -89,6 +93,29 @@ export function resolveScope(
     const pages: number[] = []
     for (let p = firstWanted; p <= totalPages; p++) if (p !== currentPage) pages.push(p)
     return { pages, hasMiddleGap: firstWanted > 1 }
+  }
+
+  if (scope.kind === 'manual') {
+    // Clamp the requested range to sensible bounds. ppp-based math means we
+    // overshoot slightly in either direction (fetch a page even if only one
+    // post of it is in range) — caller filters precisely after fetch.
+    const start = Math.max(1, Math.min(scope.startPost, scope.endPost))
+    const end = Math.max(start, scope.endPost)
+    const startPage = Math.max(1, Math.min(totalPages, Math.ceil(start / ppp)))
+    const endPage = Math.max(startPage, Math.min(totalPages, Math.ceil(end / ppp)))
+    const pages: number[] = []
+    for (let p = startPage; p <= endPage; p++) {
+      if (p !== currentPage) pages.push(p)
+    }
+    return {
+      pages,
+      hasMiddleGap: startPage > 1 || endPage < totalPages,
+      manualRange: {
+        startPost: start,
+        endPost: end,
+        pageOffset: (startPage - 1) * ppp,
+      },
+    }
   }
 
   // bookend: first M + last M pages

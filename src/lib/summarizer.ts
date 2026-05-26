@@ -16,6 +16,27 @@ export const DEFAULT_META_THRESHOLD = 8
 export const MAX_IMAGES_PER_CHUNK = 10
 export const MAX_IMAGES_PER_META = 10
 
+/**
+ * Token budgeting constants for adaptive chunking (Context Layer 3).
+ *
+ * INPUT_BUDGET_CAP — even when a model has 128K context, packing one giant
+ * chunk degrades summary quality (long-context attention falls off). Cap
+ * input per chunk to a sweet-spot value regardless of model size.
+ *
+ * OUTPUT_RESERVE — context the model needs for its response. Bullet
+ * summaries are typically 200-500 tokens; 1024 is comfortable.
+ *
+ * PROMPT_OVERHEAD — system prompt + thread title + batch marker + safety
+ * margin. Roughly measured at ~200 tokens; pad to 700.
+ *
+ * IMAGE_TOKEN_BUDGET — Ollama vision models budget ~256 tokens per image
+ * (varies by model and tile count). We reserve this when vision is on.
+ */
+const INPUT_BUDGET_CAP = 8192
+const OUTPUT_RESERVE = 1024
+const PROMPT_OVERHEAD = 700
+const IMAGE_TOKEN_BUDGET = 256
+
 export interface SummarizeOptions {
   chunkSize?: number
   metaThreshold?: number
@@ -76,7 +97,16 @@ export async function* summarizeThread(
   const visionCapable =
     !!opts.fetchImage && !!(await provider.isVisionCapable?.(model))
 
-  const chunks = chunkPosts(posts, chunkSize)
+  // Adaptive chunking by token budget — falls back to fixed chunkSize when
+  // the provider doesn't expose context size.
+  const maxCtx = await provider.getMaxContextTokens?.(model)
+  const chunks = maxCtx
+    ? await chunkPostsByBudget(
+        posts,
+        perChunkPostBudget(maxCtx, visionCapable),
+        (text) => provider.countTokens(text, model),
+      )
+    : chunkPosts(posts, chunkSize)
   yield { kind: 'started', totalPosts: posts.length, totalChunks: chunks.length }
 
   let chunkSummaries: string[] = []
@@ -210,5 +240,52 @@ function chunkPosts(posts: Post[], size: number): Post[][] {
   for (let i = 0; i < posts.length; i += size) {
     chunks.push(posts.slice(i, i + size))
   }
+  return chunks
+}
+
+/**
+ * Tokens we'll spend on post content per chunk. Total chunk budget is the
+ * model's effective context minus reserves for output, prompt scaffolding,
+ * and image payload tokens (when vision is on).
+ */
+function perChunkPostBudget(maxCtx: number, visionCapable: boolean): number {
+  const inputBudget = Math.min(INPUT_BUDGET_CAP, maxCtx - OUTPUT_RESERVE)
+  const imagesReserve = visionCapable ? MAX_IMAGES_PER_CHUNK * IMAGE_TOKEN_BUDGET : 0
+  // Floor so a tiny-context model still gets *something*.
+  return Math.max(512, inputBudget - PROMPT_OVERHEAD - imagesReserve)
+}
+
+/**
+ * Pack posts into chunks that each fit a token budget. A single oversized
+ * post still becomes its own chunk (Ollama's sliding window may truncate it,
+ * which is no worse than today's behavior).
+ */
+async function chunkPostsByBudget(
+  posts: Post[],
+  budget: number,
+  countTokens: (text: string) => Promise<number>,
+): Promise<Post[][]> {
+  const chunks: Post[][] = []
+  let current: Post[] = []
+  let currentTokens = 0
+
+  for (const post of posts) {
+    const text =
+      `Post #${post.position} by ${post.author}${post.timestamp ? ` (${post.timestamp})` : ''}:\n${post.content}`
+    const tokens = await countTokens(text)
+
+    if (current.length === 0) {
+      current.push(post)
+      currentTokens = tokens
+    } else if (currentTokens + tokens > budget) {
+      chunks.push(current)
+      current = [post]
+      currentTokens = tokens
+    } else {
+      current.push(post)
+      currentTokens += tokens
+    }
+  }
+  if (current.length > 0) chunks.push(current)
   return chunks
 }

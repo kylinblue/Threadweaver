@@ -76,14 +76,16 @@ async function fetchPagePosts(url: string) {
 
 const MAX_IMAGE_BYTES = 512 * 1024 // raw binary; base64 grows ~33%
 
-// MIMEs we'll forward to Ollama. SVG (vector), HEIC/AVIF (variable support),
-// and anything non-image excluded.
+// MIMEs we'll forward to Ollama. Narrowed to JPEG + PNG only:
+// - GIF: animated frames make Ollama's vision pipeline 500
+// - WebP: animated (VP8X) variants 500 for the same reason; sniff can't
+//   reliably distinguish single-frame from animated without parsing chunks
+// - SVG: vector, no value to a vision model
+// - HEIC/AVIF: variable Ollama support
 const ALLOWED_MIME = new Set([
   'image/jpeg',
   'image/jpg',
   'image/png',
-  'image/gif',
-  'image/webp',
 ])
 
 async function fetchImageBase64(
@@ -115,6 +117,11 @@ async function fetchImageBase64(
   for (let i = 0; i < buf.length; i += CHUNK) {
     bin += String.fromCharCode(...buf.subarray(i, i + CHUNK))
   }
+  // Diagnostic: helps map 500s back to specific URLs. Side panel DevTools
+  // will show these just before any Ollama image-format error.
+  console.info(
+    `[ThreadWeaver] image attached: ${sniffed} ${buf.length}B  ${url}`,
+  )
   return { base64: btoa(bin), mimeType: sniffed }
 }
 
@@ -129,20 +136,6 @@ function sniffImageFormat(b: Uint8Array): string | null {
   ) {
     return 'image/png'
   }
-  if (
-    b.length >= 6 &&
-    b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38 &&
-    (b[4] === 0x37 || b[4] === 0x39) && b[5] === 0x61
-  ) {
-    return 'image/gif'
-  }
-  // WebP: "RIFF" + 4 size bytes + "WEBP"
-  if (
-    b.length >= 12 &&
-    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
-    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
-  ) {
-    return 'image/webp'
-  }
+  // GIF and WebP deliberately not recognized — see ALLOWED_MIME comment.
   return null
 }

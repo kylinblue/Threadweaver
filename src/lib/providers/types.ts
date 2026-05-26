@@ -48,6 +48,13 @@ export interface LLMProvider {
    * payloads entirely.
    */
   isVisionCapable?(model?: string): Promise<boolean>
+
+  /**
+   * Optional. The effective context window in tokens the provider will use
+   * for this model on the next request. Callers use this to size chunks so
+   * prompts don't get silently truncated.
+   */
+  getMaxContextTokens?(model?: string): Promise<number>
 }
 
 export class ProviderError extends Error {

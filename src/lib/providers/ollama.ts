@@ -134,6 +134,15 @@ export class OllamaProvider implements LLMProvider {
     return visionCapable
   }
 
+  /**
+   * Effective context window the request will actually use — same value
+   * served to Ollama via options.num_ctx. Used by the summarizer to size
+   * chunks adaptively.
+   */
+  async getMaxContextTokens(model?: string): Promise<number> {
+    return this.resolveCtx(model ?? this.defaultModel)
+  }
+
   async listModels(): Promise<string[]> {
     let res: Response
     try {

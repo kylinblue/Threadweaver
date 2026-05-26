@@ -43,6 +43,66 @@ export function derivePageUrls(pagination: Pagination): string[] {
   return urls
 }
 
+export type AnalysisScope =
+  | { kind: 'this-page' }
+  | { kind: 'bookend'; postsPerSide: number }
+  | { kind: 'last'; postCount: number }
+  | { kind: 'all' }
+
+export interface ScopeSelection {
+  /** 1-based page numbers we'll fetch (excluding the current page, which we
+   *  already have rendered). May be empty for 'this-page'. */
+  pages: number[]
+  /** Indicates the result skips the middle of the thread, so the summarizer
+   *  can tell the model about the gap. */
+  hasMiddleGap: boolean
+}
+
+/**
+ * Map an AnalysisScope to a concrete set of page numbers to fetch. Caller
+ * provides current page so we don't re-fetch what's already in the DOM.
+ */
+export function resolveScope(
+  scope: AnalysisScope,
+  pagination: Pagination,
+  postsOnCurrentPage: number,
+): ScopeSelection {
+  const { totalPages, currentPage } = pagination
+
+  if (scope.kind === 'this-page' || totalPages <= 1) {
+    return { pages: [], hasMiddleGap: false }
+  }
+  if (scope.kind === 'all') {
+    const pages: number[] = []
+    for (let p = 1; p <= totalPages; p++) if (p !== currentPage) pages.push(p)
+    return { pages, hasMiddleGap: false }
+  }
+
+  // Derive posts-per-page from current page count (estimate). Works for the
+  // common case where current page is a "full" page; degrades to ~15
+  // (phpBB-default) for last-page-only views.
+  const ppp = Math.max(1, postsOnCurrentPage || 15)
+
+  if (scope.kind === 'last') {
+    const pagesNeeded = Math.ceil(scope.postCount / ppp)
+    const firstWanted = Math.max(1, totalPages - pagesNeeded + 1)
+    const pages: number[] = []
+    for (let p = firstWanted; p <= totalPages; p++) if (p !== currentPage) pages.push(p)
+    return { pages, hasMiddleGap: firstWanted > 1 }
+  }
+
+  // bookend: first M + last M pages
+  const m = Math.max(1, Math.ceil(scope.postsPerSide / ppp))
+  const wanted = new Set<number>()
+  for (let p = 1; p <= Math.min(m, totalPages); p++) wanted.add(p)
+  for (let p = Math.max(1, totalPages - m + 1); p <= totalPages; p++) wanted.add(p)
+  wanted.delete(currentPage)
+  const pages = [...wanted].sort((a, b) => a - b)
+  // Gap exists when the middle isn't covered.
+  const hasMiddleGap = m * 2 < totalPages
+  return { pages, hasMiddleGap }
+}
+
 function buildPageUrl(canonicalUrl: string, page: number, scheme: PageScheme): string {
   if (page === 1) return canonicalUrl
   const url = new URL(canonicalUrl)

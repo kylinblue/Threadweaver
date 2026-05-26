@@ -2,30 +2,30 @@
 
 Out-of-scope items captured during development. Not blockers for the current phase.
 
-## Context length: adaptive chunking + settings override
+## Page/post-aware "Auto-follow" mode
 
-Phase: post-Layer-1.5. Today [src/lib/providers/ollama.ts](src/lib/providers/ollama.ts) reads each model's architectural max context via `/api/show` and clamps to a `MAX_CTX_REQUEST=32768` ceiling. That handles "shrunk by default" cases but doesn't help when our actual prompt would exceed the resolved context.
-
-Followups:
-
-- **Layer 3 — Estimate before send.** In `summarizeThread`, compute estimated prompt tokens for each chunk (`countTokens()` already provides chars/4 fallback) and compare against the model's resolved num_ctx. If estimate > 80% of context, dynamically shrink chunk size for that pass, or surface a warning. Same for meta-summarize when concatenated summaries grow.
-- **Layer 4 — Settings override.** Expose num_ctx ceiling in settings UI for advanced users who want to push past 32K on big-context models (at VRAM cost). Default stays 32K. Probably belongs near the model dropdown.
-- **Better token counting.** Current chars/4 is wildly off for code, lists, non-English text. Ollama could expose a count_tokens endpoint (some providers do); investigate. Falling back to `prompt_eval_count` from previous generate responses gives a calibration signal we could persist per model.
-
-Related: [src/lib/providers/ollama.ts](src/lib/providers/ollama.ts), [src/lib/summarizer.ts](src/lib/summarizer.ts).
-
-## Vision models: send post images alongside text
-
-When the selected Ollama model supports image input (e.g. `gemma4`, `llava`, `llama3.2-vision`, `qwen2.5-vl`), include images from posts in the prompt rather than dropping them. (Gemma 4 confirmed solid as a vision model during 2026-05 testing.) Many forum posts carry meaningful information in images — technical diagrams, screenshots, photos — that's currently invisible to the summarizer.
+As the user navigates pages within the same canonical thread URL, auto-trigger a per-page summarize that accumulates into a rolling cross-page meta — they "weave" through a thread and get a continuously-updating summary without clicking Analyze each page. Should keep the model hot (Ollama's `keep_alive` default 5min handles this naturally if pages are visited promptly).
 
 Implementation pointers:
-- **Capability detection.** `POST /api/show {"model": "<name>"}` returns a `capabilities` array; check for `"vision"`. Cache result per model. Surface as a small badge in settings ("vision capable").
-- **Image extraction.** Extend `extractPosts` to also collect `img` URLs from inside the content selector (skipping emoji/avatar/sig images via the existing ignore selector, plus size threshold — avoid 16×16 icons). Store on `Post` as `images: string[]`.
-- **Image payload.** Ollama's `/api/chat` accepts `messages[].images: string[]` of **base64-encoded** image data (not URLs). So we'd `fetch(imageUrl, { credentials: 'include' })` from the content script (cookies needed for member-only forums), convert to base64, and attach.
-- **Prompt update.** In `buildSummarizePostsMessages`, when vision-capable, emit one user message per post with `images` populated, rather than the current single concatenated user message. Or interleave — needs prompt experimentation.
-- **Token / size budget.** Images eat context fast; cap per-post image count and add a max-bytes filter. The summarizer chunk size may need tuning down to compensate.
+- **Toggle.** Add an `Auto-follow this thread` checkbox to ThreadCard, defaulting OFF (auto-summarizing on every navigation is disruptive when reading casually).
+- **Trigger.** `chrome.tabs.onUpdated` listener that fires when the URL changes within the same canonical URL (compare derived canonical of new URL vs current `detection.pagination.canonicalUrl`). Debounce to avoid double-fires on phpBB redirects.
+- **Global post position.** Currently `extractPosts` numbers posts 1..N per page. For auto-follow, we want global thread positions (page 2 of phpBB at start=15 with 15/page → posts numbered 16..30). Use pagination scheme + currentPage offset.
+- **Accumulation.** Each page-analyze adds posts + chunk-summary to IndexedDB keyed by canonical URL. Maintain a "rolling meta" that re-runs meta-summarize over all current chunks each time a new page lands.
+- **UX.** Show a small "Following thread (page N of M analyzed)" status in ThreadCard; SummaryCard reflects rolling meta in near-real-time.
+- **Edge cases.** User clicks back-button rapidly → don't analyze pages they're just skimming through. Minimum dwell time (~5s) before triggering.
 
-Related: [src/content/extract.ts](src/content/extract.ts), [src/lib/providers/ollama.ts](src/lib/providers/ollama.ts), [src/lib/prompts.ts](src/lib/prompts.ts), [src/lib/types.ts](src/lib/types.ts).
+Related: [src/sidepanel/App.tsx](src/sidepanel/App.tsx), [src/lib/summarizer.ts](src/lib/summarizer.ts), [src/content/extract.ts](src/content/extract.ts).
+
+## Context length: settings override + better token counting
+
+Layers 1.5 and 3 are shipped (model context discovery + adaptive token-budget
+chunking). Remaining followups:
+
+- **Layer 4 — Settings override.** Expose the `INPUT_BUDGET_CAP` (currently 8K) and `MAX_CTX_REQUEST` (currently 32K) in settings UI for advanced users who want to push past on big-context models (at VRAM cost). Default stays as-is.
+- **Better token counting.** Current chars/4 estimate is wildly off for code, lists, non-English text — leading to either wasted budget (over-estimate) or silent truncation (under-estimate). Investigate: Ollama could expose a count endpoint via `/api/generate {prompt, keep_alive: 0}` which returns `prompt_eval_count` without generating. Calibrate per model and persist.
+- **Meta-summarize budget enforcement.** Current code adaptive-chunks the per-post pass but meta-summarize concatenates N chunk summaries blindly. If N is large, can blow context. Add recursive halving fallback or just surface a warning when meta input exceeds budget.
+
+Related: [src/lib/providers/ollama.ts](src/lib/providers/ollama.ts), [src/lib/summarizer.ts](src/lib/summarizer.ts).
 
 ## Cross-page fetch — rate-limit and politeness
 

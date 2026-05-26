@@ -11,7 +11,11 @@ import type {
   ContentResponse,
   PaginationInfo,
 } from '../lib/messages'
-import { derivePageUrls } from '../lib/pagination'
+import {
+  derivePageUrls,
+  resolveScope,
+  type AnalysisScope,
+} from '../lib/pagination'
 import { buildAnswerQueryMessages } from '../lib/prompts'
 import { OllamaProvider, type LoadedModel } from '../lib/providers/ollama'
 import type { ChatMessage } from '../lib/providers/types'
@@ -34,6 +38,10 @@ import type { ForumPlatform, Post } from '../lib/types'
 
 const MAX_PAGE_CHARS = 16_000
 const MAX_QUERY_IMAGES = 5
+const BIG_FETCH_CONFIRM_THRESHOLD = 10
+const BOOKEND_POSTS_PER_SIDE = 25
+const LAST_N_POSTS = 100
+const HUGE_THREAD_THRESHOLD_POSTS = 100
 
 type ConnState =
   | { kind: 'idle' }
@@ -79,7 +87,9 @@ export function App() {
   const [loadedModels, setLoadedModels] = useState<LoadedModel[]>([])
   const [unloading, setUnloading] = useState<boolean>(false)
   const [query, setQuery] = useState<Query>({ kind: 'idle' })
-  const [includeAllPages, setIncludeAllPages] = useState<boolean>(false)
+  const [scope, setScope] = useState<AnalysisScope>({ kind: 'this-page' })
+  const [useImages, setUseImages] = useState<boolean>(true)
+  const [visionModel, setVisionModel] = useState<boolean>(false)
   const abortRef = useRef<AbortController | null>(null)
   const queryAbortRef = useRef<AbortController | null>(null)
 
@@ -127,19 +137,33 @@ export function App() {
       return
     }
 
+    // Resolve scope → set of page numbers to fetch beyond what we already have.
+    const selection = resolveScope(scope, detection.pagination, detection.posts.length)
+
+    // Big-fetch guardrail: confirm before pulling a lot of pages.
+    if (selection.pages.length > BIG_FETCH_CONFIRM_THRESHOLD) {
+      const ok = window.confirm(
+        `This will fetch ${selection.pages.length} additional pages from the forum (~${Math.ceil(selection.pages.length * 0.5)}s at minimum, possibly tripping rate limits on big threads). Continue?`,
+      )
+      if (!ok) return
+    }
+
     abortRef.current?.abort()
     const abort = new AbortController()
     abortRef.current = abort
 
     try {
       let postsToAnalyze = detection.posts
+      let hasMiddleGap = false
 
-      if (includeAllPages && detection.pagination.totalPages > 1) {
-        postsToAnalyze = await fetchAllPagesPosts(
+      if (selection.pages.length > 0) {
+        postsToAnalyze = await fetchSpecificPagesPosts(
           detection,
+          selection.pages,
           (msg) => setAnalysis({ kind: 'fetching', message: msg }),
           abort.signal,
         )
+        hasMiddleGap = selection.hasMiddleGap
       }
 
       setAnalysis({ kind: 'thread-running', progress: [], rollingSummary: '' })
@@ -148,14 +172,19 @@ export function App() {
         provider,
         {
           url: detection.pagination.canonicalUrl,
-          title: detection.title,
+          title: hasMiddleGap
+            ? `${detection.title} (selected slice of a larger thread)`
+            : detection.title,
           platform: detection.platform,
         },
         postsToAnalyze,
         {
           model,
           abortSignal: abort.signal,
-          fetchImage: fetchImageFromActiveTab,
+          // Vision toggle: only pass fetchImage when user has it enabled AND
+          // we're not on a non-vision model. The latter check is also done
+          // inside the summarizer, but skipping the callback early saves cycles.
+          ...(useImages && { fetchImage: fetchImageFromActiveTab }),
         },
       )
 
@@ -185,7 +214,7 @@ export function App() {
     } finally {
       abortRef.current = null
     }
-  }, [settings, detection, includeAllPages])
+  }, [settings, detection, scope, useImages])
 
   const onCancel = useCallback(() => {
     abortRef.current?.abort()
@@ -214,6 +243,18 @@ export function App() {
   useEffect(() => {
     void refreshLoadedModels()
   }, [conn.kind, analysis.kind === 'done', settings?.ollama.baseUrl])
+
+  // Vision capability per (model, baseUrl). Drives whether the "Include
+  // images" toggle appears in ThreadCard.
+  useEffect(() => {
+    if (!settings || conn.kind !== 'ok') { setVisionModel(false); return }
+    const provider = new OllamaProvider(settings.ollama.baseUrl)
+    let cancelled = false
+    void provider.isVisionCapable(settings.ollama.model).then((v) => {
+      if (!cancelled) setVisionModel(v)
+    })
+    return () => { cancelled = true }
+  }, [settings?.ollama.baseUrl, settings?.ollama.model, conn.kind])
 
   const onUnloadAll = useCallback(async () => {
     if (!settings || loadedModels.length === 0) return
@@ -251,6 +292,23 @@ export function App() {
   // Reset query state when the thread changes.
   useEffect(() => {
     setQuery({ kind: 'idle' })
+  }, [canonicalUrl])
+
+  // When a thread is detected, pick a sensible default scope: bookend for
+  // anything over the "huge" threshold so users get a rough idea quickly
+  // rather than accidentally fetching 100 pages. This-page otherwise.
+  // Only fires when canonical URL changes, so user's manual scope choice
+  // sticks while they stay on the same thread.
+  useEffect(() => {
+    if (detection.kind !== 'ready') return
+    const totalPosts =
+      detection.pagination.totalPosts ??
+      detection.posts.length * detection.pagination.totalPages
+    if (totalPosts > HUGE_THREAD_THRESHOLD_POSTS) {
+      setScope({ kind: 'bookend', postsPerSide: BOOKEND_POSTS_PER_SIDE })
+    } else {
+      setScope({ kind: 'this-page' })
+    }
   }, [canonicalUrl])
 
   const onAsk = useCallback(
@@ -369,8 +427,11 @@ export function App() {
         detection={detection}
         analysis={analysis}
         connReady={conn.kind === 'ok'}
-        includeAllPages={includeAllPages}
-        onIncludeAllPagesChange={setIncludeAllPages}
+        scope={scope}
+        onScopeChange={setScope}
+        visionModel={visionModel}
+        useImages={useImages}
+        onUseImagesChange={setUseImages}
         onAnalyze={onAnalyze}
         onCancel={onCancel}
         onRefresh={onRefresh}
@@ -523,8 +584,11 @@ function ThreadCard({
   detection,
   analysis,
   connReady,
-  includeAllPages,
-  onIncludeAllPagesChange,
+  scope,
+  onScopeChange,
+  visionModel,
+  useImages,
+  onUseImagesChange,
   onAnalyze,
   onCancel,
   onRefresh,
@@ -532,8 +596,11 @@ function ThreadCard({
   detection: Detection
   analysis: Analysis
   connReady: boolean
-  includeAllPages: boolean
-  onIncludeAllPagesChange: (b: boolean) => void
+  scope: AnalysisScope
+  onScopeChange: (s: AnalysisScope) => void
+  visionModel: boolean
+  useImages: boolean
+  onUseImagesChange: (b: boolean) => void
   onAnalyze: () => void
   onCancel: () => void
   onRefresh: () => void
@@ -553,6 +620,16 @@ function ThreadCard({
       : 0
   const totalIsExact =
     detection.kind === 'ready' && detection.pagination.totalPosts != null
+  const isHuge = totalPosts > HUGE_THREAD_THRESHOLD_POSTS
+
+  const scopeKey: string = (() => {
+    switch (scope.kind) {
+      case 'this-page': return 'this-page'
+      case 'bookend': return 'bookend'
+      case 'last': return 'last'
+      case 'all': return 'all'
+    }
+  })()
 
   return (
     <section className="card">
@@ -588,15 +665,42 @@ function ThreadCard({
               <> · {totalIsExact ? '' : '~'}{totalPosts} total</>
             )}
           </p>
+
           {isMultiPage && (
+            <label>
+              Scope
+              <select
+                value={scopeKey}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === 'this-page') onScopeChange({ kind: 'this-page' })
+                  else if (v === 'bookend') onScopeChange({ kind: 'bookend', postsPerSide: BOOKEND_POSTS_PER_SIDE })
+                  else if (v === 'last') onScopeChange({ kind: 'last', postCount: LAST_N_POSTS })
+                  else if (v === 'all') onScopeChange({ kind: 'all' })
+                }}
+                disabled={running}
+              >
+                <option value="this-page">This page only ({detection.posts.length} posts)</option>
+                <option value="bookend">
+                  Bookend (first {BOOKEND_POSTS_PER_SIDE} + last {BOOKEND_POSTS_PER_SIDE})
+                </option>
+                <option value="last">Last {LAST_N_POSTS} posts</option>
+                <option value="all">
+                  Full thread ({totalIsExact ? '' : '~'}{totalPosts} posts{isHuge ? ' — confirm needed' : ''})
+                </option>
+              </select>
+            </label>
+          )}
+
+          {visionModel && (
             <label className="row">
               <input
                 type="checkbox"
-                checked={includeAllPages}
-                onChange={(e) => onIncludeAllPagesChange(e.target.checked)}
+                checked={useImages}
+                onChange={(e) => onUseImagesChange(e.target.checked)}
                 disabled={running}
               />
-              <span>Include all {detection.pagination.totalPages} pages</span>
+              <span>Include images (vision-capable model)</span>
             </label>
           )}
         </>
@@ -615,9 +719,7 @@ function ThreadCard({
             : analysis.kind === 'page-running'
             ? 'Summarizing page…'
             : detection.kind === 'ready' && detection.posts.length > 0
-            ? includeAllPages && isMultiPage
-              ? `Analyze full thread (${totalIsExact ? '' : '~'}${totalPosts} posts)`
-              : `Analyze thread (${detection.posts.length} posts)`
+            ? analyzeButtonLabel(scope, detection.posts.length, totalPosts, totalIsExact)
             : 'Summarize page'}
         </button>
         {running && (
@@ -630,6 +732,21 @@ function ThreadCard({
       )}
     </section>
   )
+}
+
+function analyzeButtonLabel(
+  scope: AnalysisScope,
+  postsOnPage: number,
+  totalPosts: number,
+  totalIsExact: boolean,
+): string {
+  const approx = totalIsExact ? '' : '~'
+  switch (scope.kind) {
+    case 'this-page': return `Analyze this page (${postsOnPage} posts)`
+    case 'bookend': return `Analyze bookend (${scope.postsPerSide * 2} posts)`
+    case 'last': return `Analyze last ${scope.postCount} posts`
+    case 'all': return `Analyze full thread (${approx}${totalPosts} posts)`
+  }
 }
 
 function ProgressList({ events }: { events: ProgressEvent[] }) {
@@ -867,41 +984,53 @@ type DetectionReady = Extract<Detection, { kind: 'ready' }>
 const POLITENESS_DELAY_MS = 200
 
 /**
- * Walk all pages of the current thread via the page's content script (uses
- * the user's session cookies), merge posts in page order, dedupe by
+ * Fetch a specific set of pages (1-based numbers) via the active tab's content
+ * script, merge with the already-rendered current page in order, dedupe by
  * (author + content snippet), renumber positions globally.
+ *
+ * Empty `extraPages` returns the current page's posts unchanged.
  */
-async function fetchAllPagesPosts(
+async function fetchSpecificPagesPosts(
   detection: DetectionReady,
+  extraPages: number[],
   onProgress: (msg: string) => void,
   signal: AbortSignal,
 ): Promise<Post[]> {
+  if (extraPages.length === 0) return detection.posts
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab?.id) throw new Error('No active tab')
 
-  const urls = derivePageUrls(detection.pagination)
-  const currentIdx = detection.pagination.currentPage - 1
-  const fetched: (Post[] | null)[] = new Array(urls.length).fill(null)
-  fetched[currentIdx] = detection.posts
+  const allUrls = derivePageUrls(detection.pagination)
+  const currentPage = detection.pagination.currentPage
+  // Build ordered (page → posts) map. Pre-fill current page; fetch the rest.
+  const fetched = new Map<number, Post[]>()
+  fetched.set(currentPage, detection.posts)
 
-  for (let i = 0; i < urls.length; i++) {
-    if (i === currentIdx) continue
+  for (let i = 0; i < extraPages.length; i++) {
+    const page = extraPages[i]
+    if (page === currentPage) continue
     if (signal.aborted) throw new Error('Aborted')
 
-    onProgress(`Fetching page ${i + 1} of ${urls.length}…`)
-    const req: ContentRequest = { type: 'FETCH_PAGE_POSTS', url: urls[i] }
+    onProgress(
+      `Fetching page ${page}${extraPages.length > 1 ? ` (${i + 1} of ${extraPages.length})` : ''}…`,
+    )
+    const req: ContentRequest = { type: 'FETCH_PAGE_POSTS', url: allUrls[page - 1] }
     const res = (await chrome.tabs.sendMessage(tab.id, req)) as ContentResponse
     if (!res || res.type !== 'FETCHED_POSTS') {
-      throw new Error(`Unexpected response from content script for page ${i + 1}`)
+      throw new Error(`Unexpected response from content script for page ${page}`)
     }
-    if (res.error) throw new Error(`Page ${i + 1}: ${res.error}`)
-    fetched[i] = res.posts
+    if (res.error) throw new Error(`Page ${page}: ${res.error}`)
+    fetched.set(page, res.posts)
     await new Promise((r) => setTimeout(r, POLITENESS_DELAY_MS))
   }
 
+  // Reassemble in page order.
+  const orderedPages = [...fetched.keys()].sort((a, b) => a - b)
   const merged: Post[] = []
-  for (const pagePosts of fetched) {
-    if (pagePosts) merged.push(...pagePosts)
+  for (const p of orderedPages) {
+    const arr = fetched.get(p)
+    if (arr) merged.push(...arr)
   }
 
   const seen = new Set<string>()

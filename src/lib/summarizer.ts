@@ -15,6 +15,7 @@ export const DEFAULT_CHUNK_SIZE = 10
 export const DEFAULT_META_THRESHOLD = 8
 export const MAX_IMAGES_PER_CHUNK = 10
 export const MAX_IMAGES_PER_META = 10
+export const DEFAULT_CONCURRENCY = 1
 
 /**
  * Token budgeting constants for adaptive chunking (Context Layer 3).
@@ -45,6 +46,12 @@ export interface SummarizeOptions {
   /** When set and the active model is vision-capable, called per image URL
    *  to retrieve base64-encoded bytes. Returns null/throws to skip an image. */
   fetchImage?: (url: string) => Promise<string | null>
+  /**
+   * Number of chunk requests in flight at once. Default 1 (serial).
+   * LM Studio with Parallel ≥ 2 benefits from higher concurrency; Ollama by
+   * default serializes per-model so concurrency > 1 just queues.
+   */
+  concurrency?: number
 }
 
 export type ProgressEvent =
@@ -83,6 +90,7 @@ export async function* summarizeThread(
 ): AsyncGenerator<ProgressEvent, string, void> {
   const chunkSize = opts.chunkSize ?? DEFAULT_CHUNK_SIZE
   const metaThreshold = opts.metaThreshold ?? DEFAULT_META_THRESHOLD
+  const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY)
   const model = opts.model ?? provider.defaultModel
 
   await upsertThread({
@@ -109,25 +117,51 @@ export async function* summarizeThread(
     : chunkPosts(posts, chunkSize)
   yield { kind: 'started', totalPosts: posts.length, totalChunks: chunks.length }
 
-  let chunkSummaries: string[] = []
+  // ---- Phase 1: per-chunk summaries (parallel-capable) -----------------
+  //
+  // Worker pool with concurrency limit. Each worker pulls the next chunk
+  // index, runs the per-chunk summary, and pushes started/done events into
+  // a queue that the outer async generator drains. We deliberately don't
+  // do interleaved meta-summarize here — see Phase 2.
+  const chunkSummaries: (string | null)[] = new Array(chunks.length).fill(null)
 
-  for (let i = 0; i < chunks.length; i++) {
-    if (opts.abortSignal?.aborted) throw new Error('Aborted')
+  const queue: ProgressEvent[] = []
+  let queueResolver: (() => void) | null = null
+  const emit = (e: ProgressEvent) => {
+    queue.push(e)
+    if (queueResolver) {
+      const r = queueResolver
+      queueResolver = null
+      r()
+    }
+  }
 
+  let nextIdx = 0
+  let firstError: Error | null = null
+
+  const runChunk = async (i: number): Promise<void> => {
+    if (opts.abortSignal?.aborted) {
+      throw new Error('Aborted')
+    }
     const chunk = chunks[i]
 
-    // Fetch images for this chunk (in post order, capped) when vision is on.
-    const imageBase64s = visionCapable && opts.fetchImage
-      ? await collectImages(chunk, opts.fetchImage, MAX_IMAGES_PER_CHUNK, opts.abortSignal)
-      : []
+    const imageBase64s =
+      visionCapable && opts.fetchImage
+        ? await collectImages(
+            chunk,
+            opts.fetchImage,
+            MAX_IMAGES_PER_CHUNK,
+            opts.abortSignal,
+          )
+        : []
 
-    yield {
+    emit({
       kind: 'chunk-started',
       chunkIndex: i,
       totalChunks: chunks.length,
       posts: chunk.length,
       ...(imageBase64s.length > 0 && { images: imageBase64s.length }),
-    }
+    })
 
     const baseMessages = buildSummarizePostsMessages(
       chunk,
@@ -155,48 +189,71 @@ export async function* summarizeThread(
       providerId: provider.id,
     })
 
-    chunkSummaries.push(res.text)
-    yield {
+    chunkSummaries[i] = res.text
+    emit({
       kind: 'chunk-done',
       chunkIndex: i,
       totalChunks: chunks.length,
       summary: res.text,
       postRangeStart,
       postRangeEnd,
-    }
+    })
+  }
 
-    if (chunkSummaries.length >= metaThreshold) {
-      yield { kind: 'meta-started', summaryCount: chunkSummaries.length }
-      const metaImages = visionCapable && opts.fetchImage
-        ? await collectImagesRoundRobin(
-            await getPostsByThread(thread.url),
-            opts.fetchImage,
-            MAX_IMAGES_PER_META,
-            opts.abortSignal,
-          )
-        : []
-      const metaMessages = attachImagesToLastMessage(
-        buildMetaSummarizeMessages(chunkSummaries, thread.title),
-        metaImages,
-      )
-      const meta = await provider.generate(metaMessages, {
-        model,
-        abortSignal: opts.abortSignal,
-      })
-      await addSummary({
-        threadUrl: thread.url,
-        kind: 'meta',
-        content: meta.text,
-        model,
-        providerId: provider.id,
-      })
-      chunkSummaries = [meta.text]
-      yield { kind: 'meta-done', summary: meta.text }
+  const worker = async (): Promise<void> => {
+    while (true) {
+      if (firstError) return
+      const i = nextIdx++
+      if (i >= chunks.length) return
+      try {
+        await runChunk(i)
+      } catch (err) {
+        firstError = err instanceof Error ? err : new Error(String(err))
+        return
+      }
     }
   }
 
-  if (chunkSummaries.length <= 1) {
-    const final = chunkSummaries[0] ?? ''
+  const workerCount = Math.min(concurrency, chunks.length)
+  const workerPromises = Array.from({ length: workerCount }, worker)
+  // Atomic teardown: flip workersDone BEFORE waking the queue resolver, so
+  // the drain loop's next iteration sees the new value. Splitting these into
+  // separate .finally and .then handlers caused the loop to wake while
+  // workersDone was still false and re-await forever — single-chunk runs
+  // would emit both events, drain, then deadlock waiting for a resolver
+  // that had already fired.
+  let workersDone = false
+  void Promise.all(workerPromises).finally(() => {
+    workersDone = true
+    if (queueResolver) {
+      const r = queueResolver
+      queueResolver = null
+      r()
+    }
+  })
+
+  while (!workersDone || queue.length > 0) {
+    while (queue.length > 0) yield queue.shift()!
+    if (!workersDone) {
+      await new Promise<void>((r) => {
+        queueResolver = r
+      })
+    }
+  }
+
+  if (firstError) throw firstError
+
+  // ---- Phase 2: meta-summarize (sequential, recursive halving) ---------
+  //
+  // All per-chunk summaries are in chunkSummaries (in original order).
+  // If we only have one chunk, that's our final summary. Otherwise we
+  // reduce via meta-summarize. For very long threads where N > metaThreshold,
+  // recurse: split into groups of metaThreshold, meta each, then meta the
+  // group-metas. Avoids stuffing too many summaries into one prompt.
+  const summaries = chunkSummaries.filter((s): s is string => s !== null)
+
+  if (summaries.length <= 1) {
+    const final = summaries[0] ?? ''
     await addSummary({
       threadUrl: thread.url,
       kind: 'final',
@@ -207,32 +264,71 @@ export async function* summarizeThread(
     return final
   }
 
+  // Pre-fetch images once for any meta passes that need them (Phase 2 doesn't
+  // re-iterate posts; images are sampled across the whole thread).
+  const metaImagesPromise =
+    visionCapable && opts.fetchImage
+      ? collectImagesRoundRobin(
+          await getPostsByThread(thread.url),
+          opts.fetchImage,
+          MAX_IMAGES_PER_META,
+          opts.abortSignal,
+        )
+      : Promise.resolve<string[]>([])
+
+  const doMetaPass = async (
+    inputs: string[],
+    isFinal: boolean,
+  ): Promise<string> => {
+    const images = isFinal ? await metaImagesPromise : []
+    const messages = attachImagesToLastMessage(
+      buildMetaSummarizeMessages(inputs, thread.title),
+      images,
+    )
+    const res = await provider.generate(messages, {
+      model,
+      abortSignal: opts.abortSignal,
+    })
+    return res.text
+  }
+
+  // Recursive halving: each pass groups summaries by metaThreshold, runs
+  // meta-summarize on each group, and recurses until only one summary remains.
+  let current = summaries
+  while (current.length > metaThreshold) {
+    yield { kind: 'meta-started', summaryCount: current.length }
+    const groups: string[][] = []
+    for (let i = 0; i < current.length; i += metaThreshold) {
+      groups.push(current.slice(i, i + metaThreshold))
+    }
+    const groupMetas: string[] = []
+    for (const g of groups) {
+      const meta = await doMetaPass(g, false)
+      groupMetas.push(meta)
+      await addSummary({
+        threadUrl: thread.url,
+        kind: 'meta',
+        content: meta,
+        model,
+        providerId: provider.id,
+      })
+    }
+    current = groupMetas
+    yield { kind: 'meta-done', summary: current[current.length - 1] ?? '' }
+  }
+
+  // Final meta over remaining summaries — also where vision images attach.
   yield { kind: 'final-started' }
-  const finalImages = visionCapable && opts.fetchImage
-    ? await collectImagesRoundRobin(
-        await getPostsByThread(thread.url),
-        opts.fetchImage,
-        MAX_IMAGES_PER_META,
-        opts.abortSignal,
-      )
-    : []
-  const finalMessages = attachImagesToLastMessage(
-    buildMetaSummarizeMessages(chunkSummaries, thread.title),
-    finalImages,
-  )
-  const finalRes = await provider.generate(finalMessages, {
-    model,
-    abortSignal: opts.abortSignal,
-  })
+  const finalText = await doMetaPass(current, true)
   await addSummary({
     threadUrl: thread.url,
     kind: 'final',
-    content: finalRes.text,
+    content: finalText,
     model,
     providerId: provider.id,
   })
-  yield { kind: 'final-done', summary: finalRes.text }
-  return finalRes.text
+  yield { kind: 'final-done', summary: finalText }
+  return finalText
 }
 
 function chunkPosts(posts: Post[], size: number): Post[][] {

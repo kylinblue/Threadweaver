@@ -220,6 +220,10 @@ export function App() {
         {
           model,
           abortSignal: abort.signal,
+          // LM Studio defaults Parallel=4 in newer releases; match it. Ollama
+          // serializes per-model unless OLLAMA_NUM_PARALLEL is set, so we
+          // stay at 1 (queued requests would just sit waiting).
+          concurrency: settings.providerId === 'lmstudio' ? 4 : 1,
           // Vision toggle: only pass fetchImage when user has it enabled AND
           // we're not on a non-vision model. The latter check is also done
           // inside the summarizer, but skipping the callback early saves cycles.

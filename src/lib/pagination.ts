@@ -30,6 +30,27 @@ export interface Pagination {
 }
 
 /**
+ * Posts-per-page used to map "post on page N" → thread-global post number.
+ * phpBB and SMF expose this in their scheme; other platforms hide it, so we
+ * fall back to the rendered current-page count (or a 15 default if we don't
+ * know yet). Last pages are typically short — caller should prefer using a
+ * non-last page's count when available, but for first-load best-effort, the
+ * current page is what we've got.
+ */
+export function postsPerPageEstimate(
+  pagination: Pagination,
+  postsOnCurrentPage: number,
+): number {
+  const { scheme, currentPage, totalPages } = pagination
+  if (scheme.kind === 'phpbb-start' || scheme.kind === 'smf-topic-offset') {
+    return scheme.postsPerPage
+  }
+  // Avoid using last-page (often partial) as the per-page estimate.
+  if (currentPage === totalPages && totalPages > 1) return 15
+  return Math.max(1, postsOnCurrentPage || 15)
+}
+
+/**
  * Return URLs for pages 1..totalPages in order. Page 1 is always canonicalUrl.
  */
 export function derivePageUrls(pagination: Pagination): string[] {

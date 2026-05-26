@@ -130,6 +130,29 @@ export async function clearThread(threadUrl: string): Promise<void> {
   await tx.done
 }
 
+/**
+ * Wipe the entire ThreadWeaver IndexedDB database. The dbPromise singleton is
+ * also reset so the next operation reopens (and the upgrade callback recreates
+ * the empty stores). Callers should additionally clear chrome.storage.local
+ * for a full reset.
+ */
+export async function clearAllData(): Promise<void> {
+  // Close the open connection before deleteDatabase; otherwise Chrome blocks
+  // the delete until all connections close, which can hang indefinitely if
+  // the side panel still holds one.
+  if (dbPromise) {
+    const db = await dbPromise
+    db.close()
+    dbPromise = null
+  }
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(DB_NAME)
+    req.onsuccess = () => resolve()
+    req.onerror = () => reject(req.error)
+    req.onblocked = () => reject(new Error('IndexedDB delete blocked'))
+  })
+}
+
 export async function getLatestSummary(
   threadUrl: string,
 ): Promise<SummaryRecord | undefined> {

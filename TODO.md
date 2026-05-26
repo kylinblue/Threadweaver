@@ -2,20 +2,6 @@
 
 Out-of-scope items captured during development. Not blockers for the current phase.
 
-## Page/post-aware "Auto-follow" mode
-
-As the user navigates pages within the same canonical thread URL, auto-trigger a per-page summarize that accumulates into a rolling cross-page meta — they "weave" through a thread and get a continuously-updating summary without clicking Analyze each page. Should keep the model hot (Ollama's `keep_alive` default 5min handles this naturally if pages are visited promptly).
-
-Implementation pointers:
-- **Toggle.** Add an `Auto-follow this thread` checkbox to ThreadCard, defaulting OFF (auto-summarizing on every navigation is disruptive when reading casually).
-- **Trigger.** `chrome.tabs.onUpdated` listener that fires when the URL changes within the same canonical URL (compare derived canonical of new URL vs current `detection.pagination.canonicalUrl`). Debounce to avoid double-fires on phpBB redirects.
-- **Global post position.** Currently `extractPosts` numbers posts 1..N per page. For auto-follow, we want global thread positions (page 2 of phpBB at start=15 with 15/page → posts numbered 16..30). Use pagination scheme + currentPage offset.
-- **Accumulation.** Each page-analyze adds posts + chunk-summary to IndexedDB keyed by canonical URL. Maintain a "rolling meta" that re-runs meta-summarize over all current chunks each time a new page lands.
-- **UX.** Show a small "Following thread (page N of M analyzed)" status in ThreadCard; SummaryCard reflects rolling meta in near-real-time.
-- **Edge cases.** User clicks back-button rapidly → don't analyze pages they're just skimming through. Minimum dwell time (~5s) before triggering.
-
-Related: [src/sidepanel/App.tsx](src/sidepanel/App.tsx), [src/lib/summarizer.ts](src/lib/summarizer.ts), [src/content/extract.ts](src/content/extract.ts).
-
 ## Context length: settings override + better token counting
 
 Layers 1.5 and 3 are shipped (model context discovery + adaptive token-budget

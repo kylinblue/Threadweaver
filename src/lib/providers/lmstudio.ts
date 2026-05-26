@@ -193,10 +193,7 @@ export class LMStudioProvider implements LLMProvider {
 
     if (!res.ok) {
       const detail = await res.text().catch(() => '')
-      throw new ProviderError(
-        `LM Studio /v1/chat/completions returned ${res.status}: ${detail}`,
-        this.id,
-      )
+      throw new ProviderError(friendlyChatError(res.status, detail), this.id)
     }
 
     const data = (await res.json()) as LMStudioChatResponse
@@ -232,10 +229,8 @@ export class LMStudioProvider implements LLMProvider {
     })
 
     if (!res.ok || !res.body) {
-      throw new ProviderError(
-        `LM Studio /v1/chat/completions stream returned ${res.status}`,
-        this.id,
-      )
+      const detail = res.body ? await res.text().catch(() => '') : ''
+      throw new ProviderError(friendlyChatError(res.status, detail), this.id)
     }
 
     const reader = res.body.getReader()
@@ -294,6 +289,49 @@ export class LMStudioProvider implements LLMProvider {
     const info = await this.getModelInfo(m)
     return info?.contextLength ?? 4096
   }
+}
+
+/**
+ * Map an LM Studio chat-endpoint HTTP error to actionable text. The 400s from
+ * llama.cpp's "n_keep > n_ctx" / context-overflow case are the user-facing
+ * ones we care most about — they happen when the loaded model's context
+ * length is smaller than a chunk plus prompt.
+ */
+function friendlyChatError(status: number, detail: string): string {
+  const inner = extractErrorMessage(detail)
+  const lower = inner.toLowerCase()
+
+  if (
+    status === 400 &&
+    (lower.includes('n_keep') || lower.includes('context'))
+  ) {
+    return `Loaded context too small for this batch.\nIn LM Studio, reload the model with a larger Context Length (Developer tab → model settings).\n\nLM Studio said: ${inner}`
+  }
+  if (status === 500 && lower.includes('image')) {
+    return `The model couldn't process an attached image.\nToggle off "Include images", or load a vision-capable (vlm) model.\n\nLM Studio said: ${inner}`
+  }
+  if (status === 404 && lower.includes('model')) {
+    return `Model not loaded.\nLoad it in LM Studio (Developer tab → load model), or pick a loaded one from Settings.\n\nLM Studio said: ${inner}`
+  }
+  return `LM Studio error (HTTP ${status}): ${inner || '(no detail)'}\nCheck the LM Studio Server log (Server tab).`
+}
+
+function extractErrorMessage(body: string): string {
+  if (!body) return ''
+  try {
+    const parsed = JSON.parse(body) as { error?: string | { message?: string } }
+    if (parsed && typeof parsed.error === 'string') return parsed.error
+    if (
+      parsed &&
+      typeof parsed.error === 'object' &&
+      typeof parsed.error.message === 'string'
+    ) {
+      return parsed.error.message
+    }
+  } catch {
+    /* not JSON */
+  }
+  return body.slice(0, 500)
 }
 
 /**

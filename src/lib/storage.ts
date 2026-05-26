@@ -54,6 +54,49 @@ export async function setSettings(next: Settings): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEY]: next })
 }
 
+export interface AutoFollowState {
+  enabled: boolean
+  /** Canonical URL of the thread we're following. Null while inactive. */
+  canonicalUrl: string | null
+  /** Page numbers that have been auto-summarized for canonicalUrl. */
+  processedPages: number[]
+}
+
+const AUTO_FOLLOW_KEY = 'tw.autoFollow'
+
+const DEFAULT_AUTO_FOLLOW: AutoFollowState = {
+  enabled: false,
+  canonicalUrl: null,
+  processedPages: [],
+}
+
+export async function getAutoFollow(): Promise<AutoFollowState> {
+  const stored = await chrome.storage.local.get(AUTO_FOLLOW_KEY)
+  const raw = stored[AUTO_FOLLOW_KEY] as Partial<AutoFollowState> | undefined
+  return { ...DEFAULT_AUTO_FOLLOW, ...raw }
+}
+
+export async function setAutoFollow(next: AutoFollowState): Promise<void> {
+  await chrome.storage.local.set({ [AUTO_FOLLOW_KEY]: next })
+}
+
+const HAS_CONNECTED_KEY = 'tw.hasConnectedBefore'
+
+/**
+ * Whether the user has ever successfully connected to a provider in this
+ * extension instance. Gates the first-run welcome card. Clearing settings
+ * via the "Clear all data" button resets this to false, which is the right
+ * UX — they get the welcome again.
+ */
+export async function getHasConnectedBefore(): Promise<boolean> {
+  const stored = await chrome.storage.local.get(HAS_CONNECTED_KEY)
+  return Boolean(stored[HAS_CONNECTED_KEY])
+}
+
+export async function setHasConnectedBefore(): Promise<void> {
+  await chrome.storage.local.set({ [HAS_CONNECTED_KEY]: true })
+}
+
 export function subscribeSettings(cb: (s: Settings) => void): () => void {
   const handler = (
     changes: Record<string, chrome.storage.StorageChange>,

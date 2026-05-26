@@ -1,4 +1,10 @@
-import { addSummary, getPostsByThread, putPosts, upsertThread } from './db'
+import {
+  addSummary,
+  getPostsByThread,
+  getSummariesByThread,
+  putPosts,
+  upsertThread,
+} from './db'
 import {
   buildMetaSummarizeMessages,
   buildSummarizePostsMessages,
@@ -52,6 +58,16 @@ export interface SummarizeOptions {
    * default serializes per-model so concurrency > 1 just queues.
    */
   concurrency?: number
+  /**
+   * 'one-shot' (default) — the provided posts are the complete analysis input.
+   * Meta-summarize folds across the chunks we just created.
+   *
+   * 'incremental' — the provided posts are an addition to an in-progress
+   * thread. After chunking them, we pull ALL chunk summaries for the canonical
+   * URL from IDB and meta-summarize across the union, producing a fresh
+   * rolling final. Used by auto-follow as the user navigates pages.
+   */
+  mode?: 'one-shot' | 'incremental'
 }
 
 export type ProgressEvent =
@@ -250,7 +266,25 @@ export async function* summarizeThread(
   // reduce via meta-summarize. For very long threads where N > metaThreshold,
   // recurse: split into groups of metaThreshold, meta each, then meta the
   // group-metas. Avoids stuffing too many summaries into one prompt.
-  const summaries = chunkSummaries.filter((s): s is string => s !== null)
+  //
+  // Incremental mode (auto-follow): pull ALL chunk summaries for the canonical
+  // URL from IDB and meta across the union — the just-saved new chunks plus
+  // every previous page's chunks. Order by saved-postRangeStart so the rolling
+  // narrative tracks the thread's reading order.
+  let summaries: string[]
+  if (opts.mode === 'incremental') {
+    const all = await getSummariesByThread(thread.url)
+    summaries = all
+      .filter((s) => s.kind === 'chunk')
+      .sort(
+        (a, b) =>
+          (a.postRangeStart ?? 0) - (b.postRangeStart ?? 0) ||
+          (a.createdAt ?? 0) - (b.createdAt ?? 0),
+      )
+      .map((s) => s.content)
+  } else {
+    summaries = chunkSummaries.filter((s): s is string => s !== null)
+  }
 
   if (summaries.length <= 1) {
     const final = summaries[0] ?? ''

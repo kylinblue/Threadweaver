@@ -189,6 +189,80 @@ button.link:hover:not(:disabled) {
   align-self: flex-start;
 }
 
+.auto-follow-row {
+  align-items: center;
+  gap: 8px;
+}
+
+.auto-follow-row em {
+  color: GrayText;
+  font-style: normal;
+  font-size: 11px;
+}
+
+.welcome-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.welcome-option {
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 5px;
+  background: Canvas;
+  color: CanvasText;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.welcome-option:hover {
+  border-color: color-mix(in srgb, CanvasText 40%, transparent);
+}
+
+.welcome-option.active {
+  border-color: color-mix(in srgb, CanvasText 60%, transparent);
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+}
+
+.welcome-option-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.welcome-option-desc {
+  font-size: 11px;
+  color: GrayText;
+}
+
+.badge.ok {
+  color: #16a34a;
+  border-color: color-mix(in srgb, #16a34a 30%, transparent);
+}
+
+.data-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.data-section button.link {
+  align-self: flex-start;
+}
+
+button.link.danger {
+  color: #dc2626;
+}
+
+button.link.danger:hover:not(:disabled) {
+  color: #dc2626;
+  text-decoration: underline;
+}
+
 .badge {
   font-size: 11px;
   padding: 2px 7px;
@@ -215,6 +289,7 @@ button.link:hover:not(:disabled) {
 
 .hint.error {
   color: #dc2626;
+  white-space: pre-wrap;
 }
 
 .hint code.block {

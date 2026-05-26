@@ -203,10 +203,7 @@ export class OllamaProvider implements LLMProvider {
 
     if (!res.ok) {
       const detail = await res.text().catch(() => '')
-      throw new ProviderError(
-        `Ollama /api/chat returned ${res.status}: ${detail}`,
-        this.id,
-      )
+      throw new ProviderError(friendlyChatError(res.status, detail), this.id)
     }
 
     const data = (await res.json()) as OllamaChatResponse
@@ -245,10 +242,8 @@ export class OllamaProvider implements LLMProvider {
     })
 
     if (!res.ok || !res.body) {
-      throw new ProviderError(
-        `Ollama /api/chat stream returned ${res.status}`,
-        this.id,
-      )
+      const detail = res.body ? await res.text().catch(() => '') : ''
+      throw new ProviderError(friendlyChatError(res.status, detail), this.id)
     }
 
     const reader = res.body.getReader()
@@ -389,6 +384,38 @@ export type VerifyResult =
   | { kind: 'empty' }
   | { kind: 'origin-blocked'; models: string[] }
   | { kind: 'unreachable'; msg: string }
+
+/**
+ * Map a chat-endpoint HTTP error to actionable text. The detail body Ollama
+ * returns is usually a short JSON error like {"error":"..."} — surface the
+ * inner message when we can extract it, then prepend a pattern-matched hint.
+ */
+function friendlyChatError(status: number, detail: string): string {
+  const inner = extractErrorMessage(detail)
+  const lower = inner.toLowerCase()
+
+  if (status === 400 && (lower.includes('n_keep') || lower.includes('context'))) {
+    return `Context window too small for this batch.\nPull a model with a larger context, or reduce the analysis scope.\n\nOllama said: ${inner}`
+  }
+  if (status === 500 && lower.includes('image')) {
+    return `The model couldn't process an attached image.\nToggle off "Include images" in the analysis controls, or switch to a different vision-capable model.\n\nOllama said: ${inner}`
+  }
+  if (status === 404 && lower.includes('model')) {
+    return `Model not found.\nPull it first with \`ollama pull <name>\`, or pick a different one from the Settings dropdown.\n\nOllama said: ${inner}`
+  }
+  return `Ollama error (HTTP ${status}): ${inner || '(no detail)'}\nCheck the Ollama logs (\`ollama serve\` in a terminal).`
+}
+
+function extractErrorMessage(body: string): string {
+  if (!body) return ''
+  try {
+    const parsed = JSON.parse(body) as { error?: string }
+    if (parsed && typeof parsed.error === 'string') return parsed.error
+  } catch {
+    /* not JSON */
+  }
+  return body.slice(0, 500)
+}
 
 /**
  * Map our ChatMessage[] to Ollama's wire format. Only difference is that we

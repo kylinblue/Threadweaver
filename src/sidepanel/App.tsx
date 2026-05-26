@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  clearAllData,
   clearThread,
   getLatestSummary,
   getPostsByThread,
@@ -13,6 +14,7 @@ import type {
 } from '../lib/messages'
 import {
   derivePageUrls,
+  postsPerPageEstimate,
   resolveScope,
   type AnalysisScope,
 } from '../lib/pagination'
@@ -29,9 +31,14 @@ import {
   collectImagesRoundRobin,
 } from '../lib/vision'
 import {
+  getAutoFollow,
+  getHasConnectedBefore,
   getSettings,
+  setAutoFollow,
+  setHasConnectedBefore,
   setSettings,
   subscribeSettings,
+  type AutoFollowState,
   type Settings,
 } from '../lib/storage'
 import {
@@ -46,6 +53,12 @@ const BIG_FETCH_CONFIRM_THRESHOLD = 10
 const BOOKEND_POSTS_PER_SIDE = 25
 const LAST_N_POSTS = 100
 const HUGE_THREAD_THRESHOLD_POSTS = 100
+/**
+ * Minimum dwell time before auto-follow kicks in on a new page. Filters out
+ * rapid back-button skimming; gives the user a moment to scroll/read before
+ * the model starts crunching. 5s is a guess — tunable from settings later.
+ */
+const AUTO_FOLLOW_DWELL_MS = 5_000
 
 type ConnState =
   | { kind: 'idle' }
@@ -94,13 +107,35 @@ export function App() {
   const [scope, setScope] = useState<AnalysisScope>({ kind: 'this-page' })
   const [useImages, setUseImages] = useState<boolean>(true)
   const [visionModel, setVisionModel] = useState<boolean>(false)
+  const [hasConnected, setHasConnected] = useState<boolean>(true)
+  const [autoFollow, setAutoFollowLocal] = useState<AutoFollowState>({
+    enabled: false,
+    canonicalUrl: null,
+    processedPages: [],
+  })
   const abortRef = useRef<AbortController | null>(null)
   const queryAbortRef = useRef<AbortController | null>(null)
+  const dwellTimerRef = useRef<number | null>(null)
+  /**
+   * Set when a tab-update event arrives while a summary is still running.
+   * We re-probe once the current run completes so the next page isn't lost.
+   */
+  const pendingProbeRef = useRef<boolean>(false)
 
   useEffect(() => {
     getSettings().then(setLocalSettings)
+    getHasConnectedBefore().then(setHasConnected)
+    getAutoFollow().then(setAutoFollowLocal)
     return subscribeSettings(setLocalSettings)
   }, [])
+
+  // Mark first-run complete the first time we see a successful connection.
+  // Persists across sessions; only "Clear all data" resets it.
+  useEffect(() => {
+    if (conn.kind === 'ok' && !hasConnected) {
+      void setHasConnectedBefore().then(() => setHasConnected(true))
+    }
+  }, [conn.kind, hasConnected])
 
   // Re-test connection whenever the active provider's base URL changes (or
   // provider switches entirely).
@@ -470,13 +505,230 @@ export function App() {
     setAnalysis({ kind: 'idle' })
   }, [canonicalUrl])
 
+  /**
+   * Auto-follow: when the user navigates within the same thread (same canonical
+   * URL), summarize the new page and roll the meta over all chunks. Renumbers
+   * posts to thread-global positions using the page-offset so the model sees
+   * "Post #41" instead of "Post #1" on page 3 of a 20-per-page forum.
+   */
+  const runAutoFollowSummary = useCallback(async () => {
+    if (!settings || detection.kind !== 'ready') return
+    if (detection.posts.length === 0) return
+
+    const provider = createProvider(settings)
+    const model = activeProviderConfig(settings).model
+
+    const ppp = postsPerPageEstimate(detection.pagination, detection.posts.length)
+    const globalOffset = (detection.pagination.currentPage - 1) * ppp
+    const posts = detection.posts.map((p, i) => {
+      const position = globalOffset + i + 1
+      return {
+        ...p,
+        position,
+        id: `post_${position}_${p.author.slice(0, 30)}_${p.content.slice(0, 50)}`,
+      }
+    })
+
+    abortRef.current?.abort()
+    const abort = new AbortController()
+    abortRef.current = abort
+
+    try {
+      setAnalysis({ kind: 'thread-running', progress: [], rollingSummary: '' })
+      const gen = summarizeThread(
+        provider,
+        {
+          url: detection.pagination.canonicalUrl,
+          title: detection.title,
+          platform: detection.platform,
+        },
+        posts,
+        {
+          model,
+          abortSignal: abort.signal,
+          concurrency: settings.providerId === 'lmstudio' ? 4 : 1,
+          ...(useImages && { fetchImage: fetchImageFromActiveTab }),
+          mode: 'incremental',
+        },
+      )
+
+      const events: ProgressEvent[] = []
+      let rolling = ''
+      let final = ''
+      while (true) {
+        const next = await gen.next()
+        if (next.done) {
+          final = next.value
+          break
+        }
+        const evt = next.value
+        events.push(evt)
+        if (evt.kind === 'chunk-done') rolling = evt.summary
+        if (evt.kind === 'meta-done' || evt.kind === 'final-done') {
+          rolling = evt.summary
+        }
+        setAnalysis({
+          kind: 'thread-running',
+          progress: [...events],
+          rollingSummary: rolling,
+        })
+      }
+      setAnalysis({ kind: 'done', finalSummary: final, source: 'thread' })
+
+      const currentPage = detection.pagination.currentPage
+      setAutoFollowLocal((prev) => {
+        if (!prev.enabled) return prev
+        const next: AutoFollowState = {
+          ...prev,
+          processedPages: [...new Set([...prev.processedPages, currentPage])].sort(
+            (a, b) => a - b,
+          ),
+        }
+        void setAutoFollow(next)
+        return next
+      })
+    } catch (err) {
+      setAnalysis({
+        kind: 'error',
+        msg: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      abortRef.current = null
+    }
+  }, [settings, detection, useImages])
+
+  /**
+   * Toggle handler. Enabling captures the current detection's canonical URL as
+   * the followed thread. Switching threads (toggling on while looking at a
+   * different thread than previously followed) clears prior processedPages.
+   * Disabling clears the followed thread.
+   */
+  const onAutoFollowToggle = useCallback(
+    async (enabled: boolean) => {
+      if (enabled && detection.kind !== 'ready') return
+      const next: AutoFollowState = enabled
+        ? {
+            enabled: true,
+            canonicalUrl: (detection as DetectionReady).pagination.canonicalUrl,
+            processedPages:
+              autoFollow.canonicalUrl ===
+              (detection as DetectionReady).pagination.canonicalUrl
+                ? autoFollow.processedPages
+                : [],
+          }
+        : { enabled: false, canonicalUrl: null, processedPages: [] }
+      setAutoFollowLocal(next)
+      await setAutoFollow(next)
+    },
+    [detection, autoFollow],
+  )
+
+  // Re-probe on tab page-loads so detection stays current. During an in-flight
+  // analysis we defer the probe — running setAnalysis(idle) under our feet
+  // would clobber progress state. The pending flag triggers a probe once the
+  // run completes.
+  useEffect(() => {
+    const onUpdated = (
+      _tabId: number,
+      changeInfo: { status?: string },
+    ) => {
+      if (changeInfo.status !== 'complete') return
+      if (
+        analysis.kind === 'thread-running' ||
+        analysis.kind === 'fetching' ||
+        analysis.kind === 'page-running'
+      ) {
+        pendingProbeRef.current = true
+        return
+      }
+      void probeActiveTab(setDetection, setAnalysis)
+    }
+    chrome.tabs.onUpdated.addListener(onUpdated)
+    return () => chrome.tabs.onUpdated.removeListener(onUpdated)
+  }, [analysis.kind])
+
+  // Drain pending probe once we exit a running state.
+  useEffect(() => {
+    if (
+      pendingProbeRef.current &&
+      analysis.kind !== 'thread-running' &&
+      analysis.kind !== 'fetching' &&
+      analysis.kind !== 'page-running'
+    ) {
+      pendingProbeRef.current = false
+      void probeActiveTab(setDetection, setAnalysis)
+    }
+  }, [analysis.kind])
+
+  // Schedule the dwell-debounced auto-follow run. Cleared on detection change
+  // (new URL = new schedule), on toggle off, on running, or on unmount.
+  useEffect(() => {
+    if (dwellTimerRef.current) {
+      window.clearTimeout(dwellTimerRef.current)
+      dwellTimerRef.current = null
+    }
+    if (!autoFollow.enabled) return
+    if (detection.kind !== 'ready') return
+    if (detection.pagination.canonicalUrl !== autoFollow.canonicalUrl) return
+    if (detection.posts.length === 0) return
+    const page = detection.pagination.currentPage
+    if (autoFollow.processedPages.includes(page)) return
+    if (
+      analysis.kind === 'thread-running' ||
+      analysis.kind === 'fetching' ||
+      analysis.kind === 'page-running'
+    ) {
+      return
+    }
+
+    dwellTimerRef.current = window.setTimeout(() => {
+      dwellTimerRef.current = null
+      void runAutoFollowSummary()
+    }, AUTO_FOLLOW_DWELL_MS)
+
+    return () => {
+      if (dwellTimerRef.current) {
+        window.clearTimeout(dwellTimerRef.current)
+        dwellTimerRef.current = null
+      }
+    }
+  }, [autoFollow, detection, analysis.kind, runAutoFollowSummary])
+
+  const onClearAllData = useCallback(async () => {
+    const ok = window.confirm(
+      'Delete all cached threads, posts, summaries, and settings? This can\'t be undone.',
+    )
+    if (!ok) return
+    await clearAllData()
+    await chrome.storage.local.clear()
+    setCachedSummary('')
+    setIndexedPostCount(0)
+    setQuery({ kind: 'idle' })
+    setAnalysis({ kind: 'idle' })
+    setLoadedModels([])
+    setHasConnected(false)
+    setAutoFollowLocal({ enabled: false, canonicalUrl: null, processedPages: [] })
+    const fresh = await getSettings()
+    setLocalSettings(fresh)
+    void testConnection(fresh, setConn)
+  }, [])
+
   if (!settings) return <main><p className="hint">Loading…</p></main>
+
+  const showWelcome = !hasConnected && conn.kind !== 'ok'
 
   return (
     <main>
       <header>
         <h1>ThreadWeaver</h1>
       </header>
+
+      {showWelcome && (
+        <WelcomeCard
+          currentProvider={settings.providerId}
+          onPickProvider={(id) => void setProviderId(id)}
+        />
+      )}
 
       <SettingsCard
         settings={settings}
@@ -491,6 +743,7 @@ export function App() {
         }}
         onRefreshLoaded={() => void refreshLoadedModels()}
         onUnloadAll={onUnloadAll}
+        onClearAllData={() => void onClearAllData()}
       />
 
       <ThreadCard
@@ -505,6 +758,8 @@ export function App() {
         onAnalyze={onAnalyze}
         onCancel={onCancel}
         onRefresh={onRefresh}
+        autoFollow={autoFollow}
+        onAutoFollowToggle={(b) => void onAutoFollowToggle(b)}
       />
 
       <SummaryCard
@@ -532,6 +787,89 @@ export function App() {
   )
 }
 
+function WelcomeCard({
+  currentProvider,
+  onPickProvider,
+}: {
+  currentProvider: Settings['providerId']
+  onPickProvider: (id: Settings['providerId']) => void
+}) {
+  const [detected, setDetected] = useState<{
+    ollama: boolean
+    lmstudio: boolean
+  } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void probeBothRuntimes().then((r) => {
+      if (!cancelled) setDetected(r)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <section className="card welcome">
+      <h2>Welcome to ThreadWeaver</h2>
+      <p className="hint">
+        Pick a local LLM runtime to get started. Both run on your machine —
+        your forum threads never leave it.
+      </p>
+      <div className="welcome-options">
+        <button
+          className={`welcome-option ${currentProvider === 'ollama' ? 'active' : ''}`}
+          onClick={() => onPickProvider('ollama')}
+        >
+          <div className="welcome-option-title">
+            Ollama
+            {detected?.ollama && <span className="badge ok"> detected </span>}
+          </div>
+          <div className="welcome-option-desc">
+            Simple CLI install. Pull a model with{' '}
+            <code>ollama pull llama3.2:3b</code>.
+          </div>
+        </button>
+        <button
+          className={`welcome-option ${currentProvider === 'lmstudio' ? 'active' : ''}`}
+          onClick={() => onPickProvider('lmstudio')}
+        >
+          <div className="welcome-option-title">
+            LM Studio
+            {detected?.lmstudio && <span className="badge ok"> detected </span>}
+          </div>
+          <div className="welcome-option-desc">
+            GUI app. Wider model selection (GGUF + MLX).{' '}
+            <strong>Enable CORS</strong> in Developer settings.
+          </div>
+        </button>
+      </div>
+      <p className="hint">
+        Then click <strong>Test connection</strong> below.
+      </p>
+    </section>
+  )
+}
+
+async function probeBothRuntimes(): Promise<{
+  ollama: boolean
+  lmstudio: boolean
+}> {
+  const ping = async (url: string): Promise<boolean> => {
+    try {
+      const res = await fetch(url, { method: 'GET' })
+      return res.ok
+    } catch {
+      return false
+    }
+  }
+  const [ollama, lmstudio] = await Promise.all([
+    ping('http://localhost:11434/api/tags'),
+    ping('http://localhost:1234/v1/models'),
+  ])
+  return { ollama, lmstudio }
+}
+
 function SettingsCard({
   settings,
   conn,
@@ -542,6 +880,7 @@ function SettingsCard({
   onRefreshLoaded,
   onUnloadAll,
   onProviderChange,
+  onClearAllData,
 }: {
   settings: Settings
   conn: ConnState
@@ -552,6 +891,7 @@ function SettingsCard({
   onTest: () => void
   onRefreshLoaded: () => void
   onUnloadAll: () => void
+  onClearAllData: () => void
 }) {
   const current = activeProviderConfig(settings)
   const isOllama = settings.providerId === 'ollama'
@@ -677,6 +1017,14 @@ function SettingsCard({
           )}
         </div>
       )}
+      <div className="data-section">
+        <span className="loaded-label">Data</span>
+        <button
+          className="link danger"
+          onClick={onClearAllData}
+          title="Wipe all cached threads, posts, summaries, and settings"
+        >Clear all data</button>
+      </div>
     </section>
   )
 }
@@ -702,6 +1050,8 @@ function ThreadCard({
   onAnalyze,
   onCancel,
   onRefresh,
+  autoFollow,
+  onAutoFollowToggle,
 }: {
   detection: Detection
   analysis: Analysis
@@ -714,6 +1064,8 @@ function ThreadCard({
   onAnalyze: () => void
   onCancel: () => void
   onRefresh: () => void
+  autoFollow: AutoFollowState
+  onAutoFollowToggle: (enabled: boolean) => void
 }) {
   const running =
     analysis.kind === 'thread-running' ||
@@ -861,6 +1213,34 @@ function ThreadCard({
                 disabled={running}
               />
               <span>Include images (vision-capable model)</span>
+            </label>
+          )}
+
+          {isMultiPage && (
+            <label className="row auto-follow-row">
+              <input
+                type="checkbox"
+                checked={
+                  autoFollow.enabled &&
+                  autoFollow.canonicalUrl === detection.pagination.canonicalUrl
+                }
+                onChange={(e) => onAutoFollowToggle(e.target.checked)}
+              />
+              <span>
+                Auto-follow this thread
+                {autoFollow.enabled &&
+                  autoFollow.canonicalUrl ===
+                    detection.pagination.canonicalUrl && (
+                    <>
+                      {' '}— <em>
+                        {autoFollow.processedPages.length} of{' '}
+                        {detection.pagination.totalPages} page
+                        {detection.pagination.totalPages === 1 ? '' : 's'}{' '}
+                        summarized
+                      </em>
+                    </>
+                  )}
+              </span>
             </label>
           )}
         </>

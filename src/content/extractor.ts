@@ -1,10 +1,11 @@
+import { log } from '../lib/log'
 import type { ContentRequest, ContentResponse } from '../lib/messages'
 import { extractPosts } from './extract'
 import { extractPagination } from './pagination'
 import { detectForumPlatform } from './platform'
 
 const platform = detectForumPlatform()
-console.log(`[ThreadWeaver] forum platform: ${platform} (${location.host})`)
+log.info(`[ThreadWeaver] forum platform: ${platform} (${location.host})`)
 
 chrome.runtime.onMessage.addListener(
   (req: ContentRequest, _sender, sendResponse: (r: ContentResponse) => void) => {
@@ -117,9 +118,7 @@ async function fetchImageBase64(
   for (let i = 0; i < buf.length; i += CHUNK) {
     bin += String.fromCharCode(...buf.subarray(i, i + CHUNK))
   }
-  // Diagnostic: helps map 500s back to specific URLs. Side panel DevTools
-  // will show these just before any Ollama image-format error.
-  console.info(
+  log.info(
     `[ThreadWeaver] image attached: ${sniffed} ${buf.length}B  ${url}`,
   )
   return { base64: btoa(bin), mimeType: sniffed }
